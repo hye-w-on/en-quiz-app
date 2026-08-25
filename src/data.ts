@@ -164,7 +164,7 @@ export const quizSections: QuizSection[] = [
   },
   {
     id: "reliable-output-shape",
-    title: "2-1-1. Four techniques",
+    title: "2-1-1. Four techniques that give Claude a reliable output shape",
     items: [
       item("2-1-1. Four techniques that give Claude a reliable output shape", "2-1-1. Claude가 안정적인 출력 형태를 갖도록 해 주는 네 가지 기법"),
       item("When a first-pass response misses, the instinct is often to add more words to the prompt and run it again.", "첫 번째 응답이 빗나가면, 보통 프롬프트에 말을 더 많이 덧붙이고 다시 실행하고 싶어집니다."),
@@ -180,7 +180,7 @@ export const quizSections: QuizSection[] = [
   },
   {
     id: "classification-shape",
-    title: "2-1-2. Classification shape",
+    title: "2-1-2. Diagnosing a classification prompt that returns the wrong output shape",
     items: [
       item("2-1-2. Diagnosing a classification prompt that returns the wrong output shape", "2-1-2. 잘못된 출력 형태를 반환하는 분류 프롬프트 진단하기"),
       item("The rule is simple: name the failure, add the one technique that matches it, and re-run it.", "규칙은 간단합니다. 실패를 이름 붙이고, 그 실패에 맞는 하나의 기법을 추가한 뒤 다시 실행하세요."),
@@ -202,7 +202,7 @@ export const quizSections: QuizSection[] = [
   },
   {
     id: "when-to-reach",
-    title: "2-1-3. When to reach",
+    title: "2-1-3. When to reach for each technique",
     items: [
       item("2-1-3. When to reach for each technique", "2-1-3. 각 기법을 언제 사용할지"),
       item("System prompts carry the behavioral contract for the whole session.", "시스템 프롬프트는 전체 세션의 행동 계약을 담습니다."),
@@ -214,7 +214,7 @@ export const quizSections: QuizSection[] = [
   },
   {
     id: "iteration-loop",
-    title: "2-1-4. Iteration loop",
+    title: "2-1-4. The iteration loop: Diagnosing before re-prompting",
     items: [
       item("2-1-4. The iteration loop: Diagnosing before re-prompting", "2-1-4. 반복 루프: 다시 프롬프트하기 전에 진단하기"),
       item("When a first-pass response misses the mark, the instinct is to add more words to the prompt and try again.", "첫 번째 응답이 목표에서 벗어나면, 프롬프트에 말을 더 추가하고 다시 시도하고 싶어집니다."),
@@ -227,7 +227,7 @@ export const quizSections: QuizSection[] = [
   },
   {
     id: "structured-outputs",
-    title: "2-1-5. Structured outputs",
+    title: "2-1-5. Moving output control from the prompt into the API with structured outputs",
     items: [
       item("2-1-5. Moving output control from the prompt into the API with structured outputs", "2-1-5. structured outputs로 출력 제어를 프롬프트에서 API로 옮기기"),
       item("Everything up to this point shapes the output by writing instructions into the prompt and hoping Claude follows them.", "여기까지의 모든 방법은 프롬프트에 지시를 작성하고 Claude가 그것을 따르기를 기대함으로써 출력을 형성합니다."),
@@ -258,7 +258,7 @@ export const quizSections: QuizSection[] = [
   },
   {
     id: "extended-thinking-does",
-    title: "2-2-1. What it does",
+    title: "2-2-1. What extended thinking does",
     items: [
       item("2-2-1. What extended thinking does", "2-2-1. 확장 사고가 하는 일"),
       item("When you turn on extended thinking, the model \"thinks out loud\" before it responds.", "확장 사고를 켜면 모델은 응답하기 전에 \"소리 내어 생각\"합니다."),
@@ -273,7 +273,7 @@ export const quizSections: QuizSection[] = [
   },
   {
     id: "extended-thinking-when",
-    title: "2-2-2. When to use",
+    title: "2-2-2. When to use extended thinking",
     items: [
       item("2-2-2. When to use extended thinking", "2-2-2. 확장 사고를 언제 사용할지"),
       item("Task shape: Multi-step reasoning where the model has to hold several constraints at once: a math derivation, a multi-hop logic problem, planning a sequence of dependent actions.", "작업 형태: 수학 유도, multi-hop 논리 문제, 의존적인 행동 순서 계획처럼 모델이 여러 제약을 동시에 붙잡아야 하는 다단계 reasoning 작업입니다."),
@@ -290,7 +290,7 @@ export const quizSections: QuizSection[] = [
   },
   {
     id: "carry-back-rule",
-    title: "2-2-3. Carry-back rule",
+    title: "2-2-3. The carry-back rule: thinking blocks must return to the API unchanged",
     items: [
       item("2-2-3. The carry-back rule: thinking blocks must return to the API unchanged", "2-2-3. carry-back 규칙: thinking block은 변경 없이 API로 되돌려 보내야 합니다."),
       item("When extended thinking is on and your conversation uses tools, there's one rule you can't skip: every thinking block you get back has to go back to the API exactly as it arrived on the next turn.", "확장 사고가 켜져 있고 대화가 도구를 사용할 때는 건너뛸 수 없는 규칙이 하나 있습니다. 받은 모든 thinking block은 다음 턴에 도착한 그대로 API로 되돌려 보내야 합니다."),

@@ -55,10 +55,42 @@ button.secondary:hover {
   background: #d7ece8;
 }
 
+button.timer-button {
+  min-width: 76px;
+  padding: 0 14px;
+}
+
+button.timer-button.auto-active {
+  background: #163d39;
+}
+
 main {
   width: min(920px, calc(100% - 32px));
   margin: 0 auto;
   padding: 42px 0;
+}
+
+.tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-bottom: 18px;
+  padding: 6px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.tab-button {
+  background: transparent;
+  color: var(--muted);
+  border-color: transparent;
+}
+
+.tab-button:hover,
+.tab-button.active {
+  background: var(--accent);
+  color: #fff;
 }
 
 .toc {
@@ -95,7 +127,8 @@ h1 {
 .toc-current {
   margin: 8px 0 0;
   color: var(--muted);
-  font-size: 14px;
+  font-size: 13px;
+  font-weight: 400;
 }
 
 .toc-list {
@@ -115,6 +148,8 @@ h1 {
   background: #fff;
   color: var(--accent-dark);
   border-color: var(--line);
+  font-size: 14px;
+  font-weight: 400;
   text-align: left;
 }
 
@@ -131,6 +166,7 @@ h1 {
 
 .toc-title {
   color: #40505a;
+  font-weight: 400;
   overflow-wrap: anywhere;
 }
 
@@ -205,6 +241,15 @@ h1 {
   align-items: center;
 }
 
+.word-controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+
+.word-controls button:first-child {
+  grid-column: 1 / -1;
+}
+
 .original {
   display: grid;
   gap: 12px;
@@ -255,6 +300,14 @@ h1 {
   }
 
   .controls button:first-child {
+    grid-column: 1 / -1;
+  }
+
+  .word-controls {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .word-controls button:first-child {
     grid-column: 1 / -1;
   }
 
