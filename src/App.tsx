@@ -2,6 +2,34 @@ import { useState } from "react";
 import { quizSections, sourceText } from "./data";
 import "./styles.css";
 
+const sourceRanges = [
+  { start: "2. Production-Grade Prompting, Agents & Tool Use", end: "2-1-1. Four techniques" },
+  { start: "2-1-1. Four techniques", end: "2-1-2. Diagnosing" },
+  { start: "2-1-2. Diagnosing", end: "2-1-3. When" },
+  { start: "2-1-3. When", end: "2-1-4. The iteration" },
+  { start: "2-1-4. The iteration", end: "2-1-5. Moving" },
+  { start: "2-1-5. Moving", end: "2-2. Extended Thinking" },
+  { start: "2-2. Extended Thinking", end: "2-2-1. What extended thinking does" },
+  { start: "2-2-1. What extended thinking does", end: "2-2-2. When to use extended thinking" },
+  { start: "2-2-2. When to use extended thinking", end: "2-2-3. The carry-back rule" },
+  { start: "2-2-3. The carry-back rule" }
+];
+
+function getSectionSource(sectionIndex: number) {
+  const range = sourceRanges[sectionIndex];
+  if (!range) {
+    return sourceText;
+  }
+
+  const startIndex = sourceText.indexOf(range.start);
+  if (startIndex < 0) {
+    return sourceText;
+  }
+
+  const endIndex = range.end ? sourceText.indexOf(range.end, startIndex + range.start.length) : -1;
+  return sourceText.slice(startIndex, endIndex > startIndex ? endIndex : undefined).trim();
+}
+
 function App() {
   const [sectionIndex, setSectionIndex] = useState(0);
   const [questionIndex, setQuestionIndex] = useState(0);
@@ -10,11 +38,13 @@ function App() {
   const [tocVisible, setTocVisible] = useState(false);
   const activeSection = quizSections[sectionIndex];
   const currentItem = activeSection.items[questionIndex];
+  const activeSourceText = getSectionSource(sectionIndex);
 
   function selectSection(nextSectionIndex: number) {
     setSectionIndex(nextSectionIndex);
     setQuestionIndex(0);
     setAnswerVisible(false);
+    setSourceVisible(false);
     setTocVisible(false);
   }
 
@@ -48,7 +78,6 @@ function App() {
               >
                 <span className="toc-index">{String(index + 1).padStart(2, "0")}</span>
                 <span className="toc-title">{section.title}</span>
-                <span className="toc-count">{section.items.length}문제</span>
               </button>
             ))}
           </nav>
@@ -102,7 +131,7 @@ function App() {
             {sourceVisible ? "원본 숨기기" : "원본 보기"}
           </button>
         </div>
-        {sourceVisible ? <p className="original-text">{sourceText}</p> : null}
+        {sourceVisible ? <p className="original-text">{activeSourceText}</p> : null}
       </section>
     </main>
   );

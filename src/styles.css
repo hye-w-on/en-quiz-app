@@ -109,7 +109,7 @@ h1 {
 
 .toc-button {
   display: grid;
-  grid-template-columns: 44px 1fr auto;
+  grid-template-columns: 44px 1fr;
   gap: 12px;
   align-items: center;
   width: 100%;
@@ -140,12 +140,6 @@ h1 {
 .toc-title {
   color: var(--ink);
   overflow-wrap: anywhere;
-}
-
-.toc-count {
-  color: var(--muted);
-  font-size: 12px;
-  white-space: nowrap;
 }
 
 .quiz-shell {
@@ -261,10 +255,6 @@ h1 {
 
   .toc-button {
     grid-template-columns: 36px 1fr;
-  }
-
-  .toc-count {
-    grid-column: 2;
   }
 
   .sentence {
