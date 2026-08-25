@@ -108,9 +108,7 @@ h1 {
 }
 
 .toc-button {
-  display: grid;
-  grid-template-columns: 44px 1fr;
-  gap: 12px;
+  display: block;
   align-items: center;
   width: 100%;
   min-height: 48px;
@@ -131,14 +129,8 @@ h1 {
   box-shadow: inset 4px 0 0 var(--accent);
 }
 
-.toc-index {
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 700;
-}
-
 .toc-title {
-  color: var(--ink);
+  color: #40505a;
   overflow-wrap: anywhere;
 }
 
@@ -251,10 +243,6 @@ h1 {
 
   .toc-toggle {
     width: 100%;
-  }
-
-  .toc-button {
-    grid-template-columns: 36px 1fr;
   }
 
   .sentence {

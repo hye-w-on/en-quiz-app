@@ -76,7 +76,6 @@ function App() {
                 key={section.id}
                 onClick={() => selectSection(index)}
               >
-                <span className="toc-index">{String(index + 1).padStart(2, "0")}</span>
                 <span className="toc-title">{section.title}</span>
               </button>
             ))}
