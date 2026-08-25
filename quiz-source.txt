@@ -122,3 +122,12 @@ Redacted thinking blocks work the same way. Their contents are encrypted and not
 This is a structural requirement, not a prompting choice you get to make. The most common slip-up is stripping out the thinking block to save context, which ends up breaking your next request. If the real worry is how much context piles up from accumulated reasoning, the fix is the context-engineering work we'll cover in this module.
 - Forward pointer
 This lesson enables reasoning and calibrates its effort setting; it does not cover model selection. Choosing which model to run, as distinct from whether to enable reasoning, is taught in the MSO Foundations module that precedes this one.
+
+Handles well
+Hard reasoning and planning tasks where a wrong answer is expensive and the extra tokens buy accuracy.
+
+Adds cost or complexity
+The carry-back requirement in tool-use loops, and an effort setting you now must calibrate.
+
+Use a different approach
+For classification, extraction, and format tasks, a well-constrained prompt is cheaper and just as accurate.

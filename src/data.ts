@@ -141,7 +141,16 @@ When extended thinking is on and your conversation uses tools, there's one rule 
 Redacted thinking blocks work the same way. Their contents are encrypted and not meant to be read by humans, but they still have to be returned untouched.
 This is a structural requirement, not a prompting choice you get to make. The most common slip-up is stripping out the thinking block to save context, which ends up breaking your next request. If the real worry is how much context piles up from accumulated reasoning, the fix is the context-engineering work we'll cover in this module.
 - Forward pointer
-This lesson enables reasoning and calibrates its effort setting; it does not cover model selection. Choosing which model to run, as distinct from whether to enable reasoning, is taught in the MSO Foundations module that precedes this one.`;
+This lesson enables reasoning and calibrates its effort setting; it does not cover model selection. Choosing which model to run, as distinct from whether to enable reasoning, is taught in the MSO Foundations module that precedes this one.
+
+Handles well
+Hard reasoning and planning tasks where a wrong answer is expensive and the extra tokens buy accuracy.
+
+Adds cost or complexity
+The carry-back requirement in tool-use loops, and an effort setting you now must calibrate.
+
+Use a different approach
+For classification, extraction, and format tasks, a well-constrained prompt is cheaper and just as accurate.`;
 
 export const quizSections: QuizSection[] = [
   {
@@ -293,7 +302,13 @@ export const quizSections: QuizSection[] = [
       item("The most common slip-up is stripping out the thinking block to save context, which ends up breaking your next request.", "가장 흔한 실수는 context를 아끼려고 thinking block을 제거하는 것이며, 결국 다음 요청을 망가뜨립니다."),
       item("If the real worry is how much context piles up from accumulated reasoning, the fix is the context-engineering work we'll cover in this module.", "진짜 걱정이 누적된 reasoning으로 context가 얼마나 쌓이는지라면, 해결책은 이 모듈에서 다룰 context-engineering 작업입니다."),
       item("This lesson enables reasoning and calibrates its effort setting; it does not cover model selection.", "이 lesson은 reasoning을 활성화하고 effort 설정을 조정하는 내용을 다루며, 모델 선택은 다루지 않습니다."),
-      item("Choosing which model to run, as distinct from whether to enable reasoning, is taught in the MSO Foundations module that precedes this one.", "reasoning을 켤지 여부와 별개로 어떤 모델을 실행할지 선택하는 내용은 이 모듈 앞의 MSO Foundations 모듈에서 배웁니다.")
+      item("Choosing which model to run, as distinct from whether to enable reasoning, is taught in the MSO Foundations module that precedes this one.", "reasoning을 켤지 여부와 별개로 어떤 모델을 실행할지 선택하는 내용은 이 모듈 앞의 MSO Foundations 모듈에서 배웁니다."),
+      item("Handles well", "잘 처리하는 경우"),
+      item("Hard reasoning and planning tasks where a wrong answer is expensive and the extra tokens buy accuracy.", "틀린 답의 비용이 크고 추가 토큰이 정확도를 높여 주는 어려운 reasoning 및 planning 작업입니다."),
+      item("Adds cost or complexity", "비용 또는 복잡성을 추가하는 경우"),
+      item("The carry-back requirement in tool-use loops, and an effort setting you now must calibrate.", "도구 사용 루프에서의 carry-back 요구사항과 이제 조정해야 하는 effort 설정입니다."),
+      item("Use a different approach", "다른 접근법을 써야 하는 경우"),
+      item("For classification, extraction, and format tasks, a well-constrained prompt is cheaper and just as accurate.", "분류, 추출, 형식 작업에는 잘 제약된 프롬프트가 더 저렴하고 충분히 정확합니다.")
     ]
   }
 ];
