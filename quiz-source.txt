@@ -1,12 +1,27 @@
-대제목: Production-Grade Prompting, Agents & Tool Use
+2. Production-Grade Prompting, Agents & Tool Use
 
-소제목: Prompting Craft
-
-핵심 문구:
+2-1. Prompting Craft
 System prompts, XML, few-shot, and output constraints
 
-Four techniques that give Claude a reliable output shape
+2-1-1. Four techniques that give Claude a reliable output shape
 
-문단:
 When a first-pass response misses, the instinct is often to add more words to the prompt and run it again. However, that instinct can make the problem harder to isolate and rarely fixes it. Rewording changes how you say something but does not add to the structural piece of the prompt that's missing. For example, if Claude is crossing the boundary between your instructions and your input data, clearer phrasing will not fix it, and if the output format keeps drifting, "please format this correctly" will not fix it either.
 The failure mode tells you which of the four techniques is absent. Diagnose how your prompt is failing first, then add the specific technique that addresses that failure. The four techniques themselves are defined in full further down this screen.
+
+What you observed: The result comes back in the wrong shape: a sentence where you expected a label, prose where you expected JSON.
+What the prompt is missing: An output constraint. The prompt never specified the form, field names, or stopping point of the response.
+Why this technique is the fix: An output constraint controls the form of the response independent of its content. Without one, Claude returns plausible text that the downstream parser was not built to accept.
+
+What you observed: The content is off: scope drifts, tone shifts, or Claude answers a wider question than you asked, and it gets worse deeper into the conversation.
+What the prompt is missing: A system prompt, or a more specific one. The behavioral contract was too vague to hold across turns.
+Why this technique is the fix: The system prompt sets the rules that apply to every response regardless of the user turn. When it is underspecified, there is nothing holding role, scope, and format steady as the conversation runs on.
+
+What you observed: The task is right, but the structure is invented: Claude understood what to do and produced output in a shape you never asked for.
+What the prompt is missing: Few-shot examples. Claude cannot infer an exact structure from a description alone.
+Why this technique is the fix: Few-shot examples show the pattern rather than describe it. One correct input-output pair gives Claude the exact shape to match, which a written instruction often fails to pin down.
+
+What you observed: Output is clean on the inputs you tested but breaks on a variant: an edge case, an unusual field, an input you did not anticipate.
+What the prompt is missing: A constraint covering the variant. The prompt handles the happy path and has no rule for the case the parser breaks on.
+Why this technique is the fix: The prompt was validated against a narrow set of inputs. Naming the variant in the constraint, or adding an example that covers it, closes the gap the test inputs never exposed.
+
+2-1-2. Diagnosing a classification prompt that returns the wrong output shape
