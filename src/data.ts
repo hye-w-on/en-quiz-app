@@ -110,7 +110,38 @@ Constraining generation has costs, and a developer choosing this in production n
 * The first request on a new schema is slower. The API compiles your schema into a grammar before it can constrain output, and that compilation adds latency on the first call. Compiled grammars are cached for 24 hours from last use, so steady traffic on a stable schema pays the cost once, but a workload that changes schemas constantly pays it repeatedly.
 * Your input token count rises. When structured outputs are on, the API adds a system prompt describing the expected format, and that injected prompt is billed like any other input token. The increase is small per call, but it is worth knowing when you are estimating cost at volume.
 * A guaranteed schema is not a guaranteed success. Two cases still return output that does not match: a refusal, where the model declines for safety reasons and the response carries stop_reason refusal, and a truncation, where the response hits the max_tokens limit and stops mid-structure with stop_reason max_tokens. Your code still checks stop_reason rather than assuming every response parses.
-* It does not combine with message prefilling. JSON outputs and prefilling the assistant message are incompatible, so a pattern that starts the response for Claude and a pattern that constrains the whole response to a schema cannot run on the same request. Pick the one that fits the task.`;
+* It does not combine with message prefilling. JSON outputs and prefilling the assistant message are incompatible, so a pattern that starts the response for Claude and a pattern that constrains the whole response to a schema cannot run on the same request. Pick the one that fits the task.
+
+2-2. Extended Thinking
+
+Extended Thinking: Turning reasoning on, calibrating effort, and reading it back correctly
+
+The prompting techniques shape what Claude produces. Extended thinking shapes how much work Claude does before it answers. Turn it on, and the model writes out its step-by-step reasoning first, then gives you the final answer. Your job is to decide when that extra work is worth the cost and to handle the reasoning it sends back.
+
+2-2-1. What extended thinking does
+
+When you turn on extended thinking, the model "thinks out loud" before it responds. You'll see this reasoning come back as its own thinking block in the API response, positioned just ahead of the block that holds the actual answer. On the newest models, the thinking block's content is omitted by default; you must request a readable summary through the display setting to see it.
+On current models reasoning is adaptive: you enable it with the thinking parameter where it is not already on by default, and the model decides how much reasoning each request needs. You tune depth with the effort setting rather than a fixed token budget. The older budget_tokens control is deprecated and, on the newest model generations, returns a 400 error.
+That reasoning isn't free; thinking tokens cost the same as output tokens, so running a simple task at high effort means paying for accuracy you don't need. The choice here mirrors the one you have already made: match the tool to the task. Don't reach for extended thinking by default, apply it strategically where needed.
+
+2-2-2. When to use extended thinking
+Task shape: Multi-step reasoning where the model has to hold several constraints at once: a math derivation, a multi-hop logic problem, planning a sequence of dependent actions.
+Extended thinking call: Enable it, with the effort level matched to the depth of the problem.
+Reason: The reasoning pass is where the model works through dependencies it would otherwise skip.
+Task shape: Mechanical or lookup tasks: classification, format conversion, extracting a field, short factual answers.
+Extended thinking call: Leave it off.
+Reason: Extended thinking will not improve the answer, and you will be paying more tokens for something you didn't need. A bare prompt with an output constraint is the right tool.
+Task shape: Agentic loops where the model plans across several tool calls.
+Extended thinking call: Enable it and budget for the planning step rather than per call.
+Reason: Reasoning before a plan reduces wrong-tool selection downstream. Note the carry-back rule below, which applies in every tool-use loop.
+
+2-2-3. The carry-back rule: thinking blocks must return to the API unchanged
+
+When extended thinking is on and your conversation uses tools, there's one rule you can't skip: every thinking block you get back has to go back to the API exactly as it arrived on the next turn. Each block comes with a signature that confirms the reasoning wasn't tampered with. If you edit it, summarize it, or drop it, the signature stops matching and the API rejects the request.
+Redacted thinking blocks work the same way. Their contents are encrypted and not meant to be read by humans, but they still have to be returned untouched.
+This is a structural requirement, not a prompting choice you get to make. The most common slip-up is stripping out the thinking block to save context, which ends up breaking your next request. If the real worry is how much context piles up from accumulated reasoning, the fix is the context-engineering work we'll cover in this module.
+- Forward pointer
+This lesson enables reasoning and calibrates its effort setting; it does not cover model selection. Choosing which model to run, as distinct from whether to enable reasoning, is taught in the MSO Foundations module that precedes this one.`;
 
 export const quizSections: QuizSection[] = [
   {
@@ -202,6 +233,67 @@ export const quizSections: QuizSection[] = [
       item("Your input token count rises.", "입력 토큰 수가 증가합니다."),
       item("A guaranteed schema is not a guaranteed success.", "schema가 보장된다고 해서 성공이 보장되는 것은 아닙니다."),
       item("It does not combine with message prefilling.", "message prefilling과는 함께 사용할 수 없습니다.")
+    ]
+  },
+  {
+    id: "extended-thinking",
+    title: "2-2. Extended Thinking",
+    items: [
+      item("2-2. Extended Thinking", "2-2. 확장 사고"),
+      item("Extended Thinking: Turning reasoning on, calibrating effort, and reading it back correctly", "확장 사고: reasoning을 켜고, effort를 조정하고, 되돌아온 reasoning을 올바르게 읽기"),
+      item("The prompting techniques shape what Claude produces.", "프롬프팅 기법은 Claude가 무엇을 만들어 내는지를 형성합니다."),
+      item("Extended thinking shapes how much work Claude does before it answers.", "확장 사고는 Claude가 답하기 전에 얼마나 많은 작업을 하는지를 형성합니다."),
+      item("Turn it on, and the model writes out its step-by-step reasoning first, then gives you the final answer.", "이를 켜면 모델은 먼저 단계별 reasoning을 작성한 뒤 최종 답변을 제공합니다."),
+      item("Your job is to decide when that extra work is worth the cost and to handle the reasoning it sends back.", "당신의 역할은 그 추가 작업이 비용을 들일 가치가 있는지 결정하고, 모델이 돌려보내는 reasoning을 처리하는 것입니다.")
+    ]
+  },
+  {
+    id: "extended-thinking-does",
+    title: "2-2-1. What it does",
+    items: [
+      item("2-2-1. What extended thinking does", "2-2-1. 확장 사고가 하는 일"),
+      item("When you turn on extended thinking, the model \"thinks out loud\" before it responds.", "확장 사고를 켜면 모델은 응답하기 전에 \"소리 내어 생각\"합니다."),
+      item("You'll see this reasoning come back as its own thinking block in the API response, positioned just ahead of the block that holds the actual answer.", "이 reasoning은 API 응답에서 실제 답변 블록 바로 앞에 위치한 별도의 thinking block으로 돌아옵니다."),
+      item("On the newest models, the thinking block's content is omitted by default; you must request a readable summary through the display setting to see it.", "최신 모델에서는 thinking block의 내용이 기본적으로 생략됩니다. 이를 보려면 display 설정을 통해 읽을 수 있는 요약을 요청해야 합니다."),
+      item("On current models reasoning is adaptive: you enable it with the thinking parameter where it is not already on by default, and the model decides how much reasoning each request needs.", "현재 모델에서 reasoning은 적응형입니다. 기본적으로 켜져 있지 않은 경우 thinking 파라미터로 활성화하고, 모델이 각 요청에 필요한 reasoning 양을 결정합니다."),
+      item("You tune depth with the effort setting rather than a fixed token budget.", "깊이는 고정된 토큰 예산이 아니라 effort 설정으로 조정합니다."),
+      item("The older budget_tokens control is deprecated and, on the newest model generations, returns a 400 error.", "이전의 budget_tokens 제어는 deprecated 되었고, 최신 모델 세대에서는 400 오류를 반환합니다."),
+      item("That reasoning isn't free; thinking tokens cost the same as output tokens, so running a simple task at high effort means paying for accuracy you don't need.", "그 reasoning은 무료가 아닙니다. thinking token은 output token과 같은 비용이 들기 때문에, 간단한 작업을 high effort로 실행하면 필요 없는 정확도에 비용을 지불하는 셈입니다."),
+      item("Don't reach for extended thinking by default, apply it strategically where needed.", "확장 사고를 기본값처럼 사용하지 말고, 필요한 곳에 전략적으로 적용하세요.")
+    ]
+  },
+  {
+    id: "extended-thinking-when",
+    title: "2-2-2. When to use",
+    items: [
+      item("2-2-2. When to use extended thinking", "2-2-2. 확장 사고를 언제 사용할지"),
+      item("Task shape: Multi-step reasoning where the model has to hold several constraints at once: a math derivation, a multi-hop logic problem, planning a sequence of dependent actions.", "작업 형태: 수학 유도, multi-hop 논리 문제, 의존적인 행동 순서 계획처럼 모델이 여러 제약을 동시에 붙잡아야 하는 다단계 reasoning 작업입니다."),
+      item("Extended thinking call: Enable it, with the effort level matched to the depth of the problem.", "확장 사고 호출: 활성화하되, 문제의 깊이에 맞게 effort 수준을 맞춥니다."),
+      item("Reason: The reasoning pass is where the model works through dependencies it would otherwise skip.", "이유: reasoning pass는 모델이 그냥 지나칠 수 있는 의존 관계를 처리하는 곳입니다."),
+      item("Task shape: Mechanical or lookup tasks: classification, format conversion, extracting a field, short factual answers.", "작업 형태: 분류, 형식 변환, 필드 추출, 짧은 사실 답변 같은 기계적 작업이나 조회 작업입니다."),
+      item("Extended thinking call: Leave it off.", "확장 사고 호출: 끕니다."),
+      item("Reason: Extended thinking will not improve the answer, and you will be paying more tokens for something you didn't need.", "이유: 확장 사고는 답을 개선하지 않으며, 필요 없는 것에 더 많은 토큰 비용을 지불하게 됩니다."),
+      item("A bare prompt with an output constraint is the right tool.", "출력 제약 조건이 있는 단순한 프롬프트가 올바른 도구입니다."),
+      item("Task shape: Agentic loops where the model plans across several tool calls.", "작업 형태: 모델이 여러 도구 호출에 걸쳐 계획하는 agentic loop입니다."),
+      item("Extended thinking call: Enable it and budget for the planning step rather than per call.", "확장 사고 호출: 활성화하고, 각 호출마다가 아니라 계획 단계에 예산을 배정합니다."),
+      item("Reason: Reasoning before a plan reduces wrong-tool selection downstream.", "이유: 계획 전에 reasoning을 하면 downstream에서 잘못된 도구를 선택할 가능성이 줄어듭니다.")
+    ]
+  },
+  {
+    id: "carry-back-rule",
+    title: "2-2-3. Carry-back rule",
+    items: [
+      item("2-2-3. The carry-back rule: thinking blocks must return to the API unchanged", "2-2-3. carry-back 규칙: thinking block은 변경 없이 API로 되돌려 보내야 합니다."),
+      item("When extended thinking is on and your conversation uses tools, there's one rule you can't skip: every thinking block you get back has to go back to the API exactly as it arrived on the next turn.", "확장 사고가 켜져 있고 대화가 도구를 사용할 때는 건너뛸 수 없는 규칙이 하나 있습니다. 받은 모든 thinking block은 다음 턴에 도착한 그대로 API로 되돌려 보내야 합니다."),
+      item("Each block comes with a signature that confirms the reasoning wasn't tampered with.", "각 block에는 reasoning이 조작되지 않았음을 확인하는 signature가 함께 옵니다."),
+      item("If you edit it, summarize it, or drop it, the signature stops matching and the API rejects the request.", "이를 수정하거나 요약하거나 제거하면 signature가 맞지 않게 되고 API가 요청을 거부합니다."),
+      item("Redacted thinking blocks work the same way.", "redacted thinking block도 같은 방식으로 작동합니다."),
+      item("Their contents are encrypted and not meant to be read by humans, but they still have to be returned untouched.", "그 내용은 암호화되어 있고 사람이 읽기 위한 것이 아니지만, 그래도 변경 없이 되돌려 보내야 합니다."),
+      item("This is a structural requirement, not a prompting choice you get to make.", "이것은 프롬프팅 선택이 아니라 구조적 요구사항입니다."),
+      item("The most common slip-up is stripping out the thinking block to save context, which ends up breaking your next request.", "가장 흔한 실수는 context를 아끼려고 thinking block을 제거하는 것이며, 결국 다음 요청을 망가뜨립니다."),
+      item("If the real worry is how much context piles up from accumulated reasoning, the fix is the context-engineering work we'll cover in this module.", "진짜 걱정이 누적된 reasoning으로 context가 얼마나 쌓이는지라면, 해결책은 이 모듈에서 다룰 context-engineering 작업입니다."),
+      item("This lesson enables reasoning and calibrates its effort setting; it does not cover model selection.", "이 lesson은 reasoning을 활성화하고 effort 설정을 조정하는 내용을 다루며, 모델 선택은 다루지 않습니다."),
+      item("Choosing which model to run, as distinct from whether to enable reasoning, is taught in the MSO Foundations module that precedes this one.", "reasoning을 켤지 여부와 별개로 어떤 모델을 실행할지 선택하는 내용은 이 모듈 앞의 MSO Foundations 모듈에서 배웁니다.")
     ]
   }
 ];
