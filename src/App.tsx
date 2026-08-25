@@ -7,6 +7,7 @@ function App() {
   const [questionIndex, setQuestionIndex] = useState(0);
   const [answerVisible, setAnswerVisible] = useState(false);
   const [sourceVisible, setSourceVisible] = useState(false);
+  const [tocVisible, setTocVisible] = useState(false);
   const activeSection = quizSections[sectionIndex];
   const currentItem = activeSection.items[questionIndex];
 
@@ -24,22 +25,30 @@ function App() {
   return (
     <main>
       <header className="toc">
-        <div>
-          <p className="toc-label">목차</p>
-          <h1>Production-Grade Prompting</h1>
+        <div className="toc-heading">
+          <div>
+            <p className="toc-label">목차</p>
+            <h1>Production-Grade Prompting</h1>
+          </div>
+          <button type="button" className="secondary toc-toggle" onClick={() => setTocVisible((visible) => !visible)}>
+            {tocVisible ? "목차 접기" : "목차 보기"}
+          </button>
         </div>
-        <nav className="toc-list" aria-label="퀴즈 목차">
-          {quizSections.map((section, index) => (
-            <button
-              type="button"
-              className={index === sectionIndex ? "toc-button active" : "toc-button"}
-              key={section.id}
-              onClick={() => selectSection(index)}
-            >
-              {section.title}
-            </button>
-          ))}
-        </nav>
+
+        {tocVisible ? (
+          <nav className="toc-list" aria-label="퀴즈 목차">
+            {quizSections.map((section, index) => (
+              <button
+                type="button"
+                className={index === sectionIndex ? "toc-button active" : "toc-button"}
+                key={section.id}
+                onClick={() => selectSection(index)}
+              >
+                {section.title}
+              </button>
+            ))}
+          </nav>
+        ) : null}
       </header>
 
       <section className="quiz-shell" aria-live="polite">

@@ -67,6 +67,13 @@ main {
   margin-bottom: 18px;
 }
 
+.toc-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: end;
+}
+
 .toc-label {
   margin: 0 0 4px;
   color: var(--accent-dark);
@@ -85,6 +92,10 @@ h1 {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.toc-toggle {
+  flex: 0 0 auto;
 }
 
 .toc-button {
@@ -201,6 +212,15 @@ h1 {
 
   h1 {
     font-size: 23px;
+  }
+
+  .toc-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .toc-toggle {
+    width: 100%;
   }
 
   .sentence {
