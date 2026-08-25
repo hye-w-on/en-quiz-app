@@ -3,31 +3,19 @@ import { quizSections, sourceText } from "./data";
 import { wordItems } from "./wordData";
 import "./styles.css";
 
-const sourceRanges = [
-  { start: "2. Production-Grade Prompting, Agents & Tool Use", end: "2-1-1. Four techniques" },
-  { start: "2-1-1. Four techniques", end: "2-1-2. Diagnosing" },
-  { start: "2-1-2. Diagnosing", end: "2-1-3. When" },
-  { start: "2-1-3. When", end: "2-1-4. The iteration" },
-  { start: "2-1-4. The iteration", end: "2-1-5. Moving" },
-  { start: "2-1-5. Moving", end: "2-2. Extended Thinking" },
-  { start: "2-2. Extended Thinking", end: "2-2-1. What extended thinking does" },
-  { start: "2-2-1. What extended thinking does", end: "2-2-2. When to use extended thinking" },
-  { start: "2-2-2. When to use extended thinking", end: "2-2-3. The carry-back rule" },
-  { start: "2-2-3. The carry-back rule" }
-];
-
 function getSectionSource(sectionIndex: number) {
-  const range = sourceRanges[sectionIndex];
-  if (!range) {
+  const section = quizSections[sectionIndex];
+  if (!section) {
     return sourceText;
   }
 
-  const startIndex = sourceText.indexOf(range.start);
+  const startIndex = sourceText.indexOf(section.title);
   if (startIndex < 0) {
     return sourceText;
   }
 
-  const endIndex = range.end ? sourceText.indexOf(range.end, startIndex + range.start.length) : -1;
+  const nextSection = quizSections[sectionIndex + 1];
+  const endIndex = nextSection ? sourceText.indexOf(nextSection.title, startIndex + section.title.length) : -1;
   return sourceText.slice(startIndex, endIndex > startIndex ? endIndex : undefined).trim();
 }
 
