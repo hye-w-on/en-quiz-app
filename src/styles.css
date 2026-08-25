@@ -61,6 +61,46 @@ main {
   padding: 42px 0;
 }
 
+.toc {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.toc-label {
+  margin: 0 0 4px;
+  color: var(--accent-dark);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+h1 {
+  margin: 0;
+  font-size: 28px;
+  line-height: 1.2;
+  letter-spacing: 0;
+}
+
+.toc-list {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.toc-button {
+  min-height: 38px;
+  background: #fff;
+  color: var(--accent-dark);
+  border-color: var(--line);
+}
+
+.toc-button:hover,
+.toc-button.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
 .quiz-shell {
   display: grid;
   gap: 16px;
@@ -157,6 +197,10 @@ main {
 
   .quiz-shell {
     padding: 18px;
+  }
+
+  h1 {
+    font-size: 23px;
   }
 
   .sentence {

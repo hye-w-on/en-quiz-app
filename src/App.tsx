@@ -1,24 +1,51 @@
 import { useState } from "react";
-import { quizItems, sourceText } from "./data";
+import { quizSections, sourceText } from "./data";
 import "./styles.css";
 
 function App() {
-  const [currentIndex, setCurrentIndex] = useState(0);
+  const [sectionIndex, setSectionIndex] = useState(0);
+  const [questionIndex, setQuestionIndex] = useState(0);
   const [answerVisible, setAnswerVisible] = useState(false);
   const [sourceVisible, setSourceVisible] = useState(false);
-  const currentItem = quizItems[currentIndex];
+  const activeSection = quizSections[sectionIndex];
+  const currentItem = activeSection.items[questionIndex];
+
+  function selectSection(nextSectionIndex: number) {
+    setSectionIndex(nextSectionIndex);
+    setQuestionIndex(0);
+    setAnswerVisible(false);
+  }
 
   function moveQuiz(step: number) {
-    setCurrentIndex((index) => Math.min(Math.max(index + step, 0), quizItems.length - 1));
+    setQuestionIndex((index) => Math.min(Math.max(index + step, 0), activeSection.items.length - 1));
     setAnswerVisible(false);
   }
 
   return (
     <main>
+      <header className="toc">
+        <div>
+          <p className="toc-label">목차</p>
+          <h1>Production-Grade Prompting</h1>
+        </div>
+        <nav className="toc-list" aria-label="퀴즈 목차">
+          {quizSections.map((section, index) => (
+            <button
+              type="button"
+              className={index === sectionIndex ? "toc-button active" : "toc-button"}
+              key={section.id}
+              onClick={() => selectSection(index)}
+            >
+              {section.title}
+            </button>
+          ))}
+        </nav>
+      </header>
+
       <section className="quiz-shell" aria-live="polite">
         <div className="meta-row">
           <span>
-            문제 {currentIndex + 1} / {quizItems.length}
+            {activeSection.title} · 문제 {questionIndex + 1} / {activeSection.items.length}
           </span>
           <span className="source">{currentItem.source}</span>
         </div>
@@ -40,7 +67,7 @@ function App() {
           <button
             type="button"
             className="secondary"
-            disabled={currentIndex === 0}
+            disabled={questionIndex === 0}
             onClick={() => moveQuiz(-1)}
           >
             이전
@@ -48,7 +75,7 @@ function App() {
           <button
             type="button"
             className="secondary"
-            disabled={currentIndex === quizItems.length - 1}
+            disabled={questionIndex === activeSection.items.length - 1}
             onClick={() => moveQuiz(1)}
           >
             다음
