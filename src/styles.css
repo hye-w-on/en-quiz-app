@@ -8,7 +8,6 @@
   --accent: #0f766e;
   --accent-dark: #0b5f59;
   --soft: #e8f4f2;
-  --mark: #f0b429;
   font-family: Arial, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
   line-height: 1.55;
   color: var(--ink);
@@ -133,23 +132,6 @@ main {
   align-items: center;
 }
 
-.dots {
-  display: flex;
-  gap: 8px;
-  margin-left: auto;
-}
-
-.dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 999px;
-  background: #c9d3d8;
-}
-
-.dot.active {
-  background: var(--mark);
-}
-
 .original {
   display: grid;
   gap: 12px;
@@ -190,9 +172,4 @@ main {
     grid-column: 1 / -1;
   }
 
-  .dots {
-    grid-column: 1 / -1;
-    margin-left: 0;
-    justify-content: center;
-  }
 }

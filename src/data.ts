@@ -32,7 +32,14 @@ What you observed: Output is clean on the inputs you tested but breaks on a vari
 What the prompt is missing: A constraint covering the variant. The prompt handles the happy path and has no rule for the case the parser breaks on.
 Why this technique is the fix: The prompt was validated against a narrow set of inputs. Naming the variant in the constraint, or adding an example that covers it, closes the gap the test inputs never exposed.
 
-2-1-2. Diagnosing a classification prompt that returns the wrong output shape`;
+2-1-2. Diagnosing a classification prompt that returns the wrong output shape
+
+The rule is simple: name the failure, add the one technique that matches it, and re-run it. If it still fails, diagnose again. When a prompt keeps getting longer with every pass, that's the sign you're skipping the diagnosis step and just adding words.
+The pattern below is the first row of the table in action: a prompt that produces the right content in a shape the downstream code cannot accept. The classifier understands the task and returns the correct category, but the form of that answer varies from run to run, so the router that consumes it fails. The missing piece is an output constraint, and the fix pulls in two of the other techniques to lock the label set and show the format. The walkthrough moves from the bare prompt that causes the problem to the constrained version that resolves it.
+
+Worked example: a classification prompt before and after
+
+A developer needs Claude to classify support tickets into three categories: billing, technical, and escalation. The first prompt is a bare instruction with no constraint on the output:`;
 
 export const quizItems: QuizItem[] = [
   {
@@ -153,6 +160,56 @@ export const quizItems: QuizItem[] = [
   {
     sentence: "2-1-2. Diagnosing a classification prompt that returns the wrong output shape",
     translation: "2-1-2. 잘못된 출력 형태를 반환하는 분류 프롬프트 진단하기",
+    source
+  },
+  {
+    sentence: "The rule is simple: name the failure, add the one technique that matches it, and re-run it.",
+    translation: "규칙은 간단합니다. 실패를 이름 붙이고, 그 실패에 맞는 하나의 기법을 추가한 뒤 다시 실행하세요.",
+    source
+  },
+  {
+    sentence: "If it still fails, diagnose again.",
+    translation: "그래도 실패한다면 다시 진단하세요.",
+    source
+  },
+  {
+    sentence: "When a prompt keeps getting longer with every pass, that's the sign you're skipping the diagnosis step and just adding words.",
+    translation: "프롬프트가 매번 실행할 때마다 계속 길어진다면, 그것은 진단 단계를 건너뛰고 단어만 덧붙이고 있다는 신호입니다.",
+    source
+  },
+  {
+    sentence: "The pattern below is the first row of the table in action: a prompt that produces the right content in a shape the downstream code cannot accept.",
+    translation: "아래 패턴은 표의 첫 번째 행이 실제로 작동하는 모습입니다. 즉, 올바른 내용을 만들지만 downstream code가 받아들일 수 없는 형태로 출력하는 프롬프트입니다.",
+    source
+  },
+  {
+    sentence: "The classifier understands the task and returns the correct category, but the form of that answer varies from run to run, so the router that consumes it fails.",
+    translation: "분류기는 작업을 이해하고 올바른 카테고리를 반환하지만, 그 답변의 형태가 실행할 때마다 달라지기 때문에 이를 사용하는 라우터가 실패합니다.",
+    source
+  },
+  {
+    sentence: "The missing piece is an output constraint, and the fix pulls in two of the other techniques to lock the label set and show the format.",
+    translation: "빠져 있는 요소는 출력 제약 조건이며, 해결책은 다른 두 기법을 함께 사용해 라벨 집합을 고정하고 형식을 보여 주는 것입니다.",
+    source
+  },
+  {
+    sentence: "The walkthrough moves from the bare prompt that causes the problem to the constrained version that resolves it.",
+    translation: "이 walkthrough는 문제를 일으키는 단순한 프롬프트에서 시작해, 문제를 해결하는 제약이 있는 버전으로 이동합니다.",
+    source
+  },
+  {
+    sentence: "Worked example: a classification prompt before and after",
+    translation: "작업 예시: 분류 프롬프트의 수정 전과 수정 후",
+    source
+  },
+  {
+    sentence: "A developer needs Claude to classify support tickets into three categories: billing, technical, and escalation.",
+    translation: "한 개발자는 Claude가 지원 티켓을 billing, technical, escalation 세 가지 카테고리로 분류하기를 원합니다.",
+    source
+  },
+  {
+    sentence: "The first prompt is a bare instruction with no constraint on the output:",
+    translation: "첫 번째 프롬프트는 출력에 대한 제약이 없는 단순한 지시문입니다.",
     source
   }
 ];

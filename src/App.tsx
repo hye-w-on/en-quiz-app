@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { quizItems, sourceText } from "./data";
 import "./styles.css";
 
@@ -7,18 +7,6 @@ function App() {
   const [answerVisible, setAnswerVisible] = useState(false);
   const [sourceVisible, setSourceVisible] = useState(false);
   const currentItem = quizItems[currentIndex];
-
-  const dots = useMemo(
-    () =>
-      quizItems.map((item, index) => (
-        <span
-          aria-hidden="true"
-          className={index === currentIndex ? "dot active" : "dot"}
-          key={item.sentence}
-        />
-      )),
-    [currentIndex]
-  );
 
   function moveQuiz(step: number) {
     setCurrentIndex((index) => Math.min(Math.max(index + step, 0), quizItems.length - 1));
@@ -65,9 +53,6 @@ function App() {
           >
             다음
           </button>
-          <div className="dots" aria-label="문제 위치">
-            {dots}
-          </div>
         </div>
       </section>
 
