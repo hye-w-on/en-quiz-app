@@ -15,6 +15,7 @@ function App() {
     setSectionIndex(nextSectionIndex);
     setQuestionIndex(0);
     setAnswerVisible(false);
+    setTocVisible(false);
   }
 
   function moveQuiz(step: number) {
@@ -29,6 +30,7 @@ function App() {
           <div>
             <p className="toc-label">목차</p>
             <h1>Production-Grade Prompting</h1>
+            <p className="toc-current">{activeSection.title}</p>
           </div>
           <button type="button" className="secondary toc-toggle" onClick={() => setTocVisible((visible) => !visible)}>
             {tocVisible ? "목차 접기" : "목차 보기"}
@@ -44,7 +46,9 @@ function App() {
                 key={section.id}
                 onClick={() => selectSection(index)}
               >
-                {section.title}
+                <span className="toc-index">{String(index + 1).padStart(2, "0")}</span>
+                <span className="toc-title">{section.title}</span>
+                <span className="toc-count">{section.items.length}문제</span>
               </button>
             ))}
           </nav>
