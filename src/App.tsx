@@ -41,6 +41,7 @@ function App() {
   const [wordAnswerVisible, setWordAnswerVisible] = useState(false);
   const [shuffledWordItems] = useState(shuffleWords);
   const [wordAutoPlay, setWordAutoPlay] = useState(false);
+  const [copiedText, setCopiedText] = useState("");
   const activeSection = quizSections[sectionIndex];
   const currentItem = activeSection.items[questionIndex];
   const currentWord = shuffledWordItems[wordIndex];
@@ -93,6 +94,12 @@ function App() {
   function moveWord(step: number) {
     setWordIndex((index) => Math.min(Math.max(index + step, 0), shuffledWordItems.length - 1));
     setWordAnswerVisible(false);
+  }
+
+  async function copyText(text: string) {
+    await navigator.clipboard.writeText(text);
+    setCopiedText(text);
+    window.setTimeout(() => setCopiedText(""), 1200);
   }
 
   return (
@@ -156,7 +163,12 @@ function App() {
             </div>
 
             <div className="sentence-box">
-              <p className="label">문장</p>
+              <div className="sentence-heading">
+                <p className="label">문장</p>
+                <button type="button" className="copy-button" onClick={() => copyText(currentItem.sentence)}>
+                  {copiedText === currentItem.sentence ? "Copied" : "Copy"}
+                </button>
+              </div>
               <p className="sentence">{currentItem.sentence}</p>
             </div>
 
@@ -215,7 +227,12 @@ function App() {
           </div>
 
           <div className="sentence-box">
-            <p className="label">단어 / 표현</p>
+            <div className="sentence-heading">
+              <p className="label">단어 / 표현</p>
+              <button type="button" className="copy-button" onClick={() => copyText(currentWord.term)}>
+                {copiedText === currentWord.term ? "Copied" : "Copy"}
+              </button>
+            </div>
             <p className="sentence">{currentWord.term}</p>
           </div>
 

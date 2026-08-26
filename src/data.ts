@@ -78,10 +78,10 @@ Diagnose before adding more: Prompts that are growing longer with each iteration
 2-1-3. When to reach for each technique
 Now, let's understand more about each of these techniques and when each one applies:
 
-1. System prompts carry the behavioral contract for the whole session. Write them once and treat them as your persistent instruction layer. They define Claude's role, the output format, and any rules that must not change between conversations.
-2. XML tags are used when the prompt mixes inputs with instructions. A prompt that asks Claude to debug code using provided documentation is a good example; without tags, the code and the documentation look the same to Claude. Wrap them with descriptive tag names like <my_code> and <docs> and the boundary becomes unambiguous. You do not need to use official XML tag names; descriptive names that match your content work best.
-3. Few-shot examples are considered useful because they show rather than just tell. Instead of trying to describe the exact format you want, you provide one correct input-output pair and let Claude infer the pattern. To use this, wrap examples using consistent XML structure, for instance <sample_input> and <ideal_output>, so the boundary between example and prompt is clear. You can use some examples from your highest-scoring evaluation outputs rather than writing them from scratch.
-4. Output constraints are the last line of defense before Claude's response reaches your parser. You should specify exactly what you need, including field names, types, length limits, whether to include preamble, and what to do when data is absent. Use structured output features in cases when the format must be machine-readable.
+1. System prompts : System prompts carry the behavioral contract for the whole session. Write them once and treat them as your persistent instruction layer. They define Claude's role, the output format, and any rules that must not change between conversations.
+2. XML tags : XML tags are used when the prompt mixes inputs with instructions. A prompt that asks Claude to debug code using provided documentation is a good example; without tags, the code and the documentation look the same to Claude. Wrap them with descriptive tag names like <my_code> and <docs> and the boundary becomes unambiguous. You do not need to use official XML tag names; descriptive names that match your content work best.
+3. Few-shot examples : Few-shot examples are considered useful because they show rather than just tell. Instead of trying to describe the exact format you want, you provide one correct input-output pair and let Claude infer the pattern. To use this, wrap examples using consistent XML structure, for instance <sample_input> and <ideal_output>, so the boundary between example and prompt is clear. You can use some examples from your highest-scoring evaluation outputs rather than writing them from scratch.
+4. Output constraints : Output constraints are the last line of defense before Claude's response reaches your parser. You should specify exactly what you need, including field names, types, length limits, whether to include preamble, and what to do when data is absent. Use structured output features in cases when the format must be machine-readable.
 
 2-1-4. The iteration loop: Diagnosing before re-prompting
 
@@ -151,6 +151,131 @@ The carry-back requirement in tool-use loops, and an effort setting you now must
 
 Use a different approach
 For classification, extraction, and format tasks, a well-constrained prompt is cheaper and just as accurate.
+
+2-3. Tool-use and Schema Design
+Tool Schemas Claude Selects Correctly: Definition, Loop, and Calling Patterns
+
+2-3-1. How the tool-use loop works
+The most common misconception about tool-use is that Claude runs the tools. Instead, Claude reads your tool definitions, decides which one fits the situation, and tells your application what to call it along with the required inputs. Your application executes the tool, gets the result, and sends it back; then Claude uses that result to continue.
+
+This back-and-forth shouldn’t be ignored in production: if your application does not handle the return correctly, Claude never gets the data it asked for, and the loop breaks. The boundary between what Claude owns and what your code owns is where most tool-use bugs live. Here is the sequence to ensure proper implementation of tool-use.
+
+Click each step to see what happens.
+1. Define schema : You define a schema with a name, a description, and an input schema. Claude reads this to decide whether and when to call the tool.
+2. Send message : Your code sends a message to Claude including the tool definitions and the user's input.
+3. tool_use block : Claude issues a tool-use block containing the tool name, a unique ID, and the input arguments it wants to pass. The API response comes back with stop_reason: tool_use.
+4. Execute tool : Your code executes the tool using those arguments. Note that the assistant turn has already ended (Claude is not holding a connection open or waiting on your server). The model is stateless between calls. To continue, your code makes a fresh API request containing the prior messages plus the tool result.
+5. Return result : You return the result in a tool-result block that references the original tool-use ID.
+6. Claude continues : Claude continues using the tool result as context for its next response, either another tool-use block or a final end turn.
+It’s important to note that the loop is not automatic and you need to complete the fourth step. If the miss is systematic, the fix is in the schema definition step.
+
+2-3-2. Message block structure in a tool-use conversation
+A tool-use conversation is built out of structured blocks, not plain text. Each assistant turn and user turn is a list of blocks, and four block types do the work in a tool-use session. A text block carries Claude’s prose response. A tool_use block carries a tool call, including the tool name, a unique ID, and the input arguments. A tool_result block carries what your code returned after running the tool. A thinking block carries Claude’s internal reasoning, and it only appears when extended thinking is enabled.
+
+The API enforces a specific pairing between these blocks. Every tool_use block in an assistant turn must be answered by a tool_result block with a matching ID in the user turn that immediately follows. If the IDs don’t match, if the result is missing, or if the turns are out of order, the request fails validation. This is not something you can fix by adjusting your prompt; it’s structural, and your code has to produce the sequence correctly on every request.
+
+The table below summarizes each block type, what it contains, and the rule that governs how your code must handle it.
+
+Block type: text block
+Role: Assistant/Claude
+Contains: Claude’s prose output
+Critical rule: Claude may return a text block alongside a tool_use block in the same turn. When it does, your code must preserve the full content array, including the text block, when appending that turn to conversation history. Dropping the text block corrupts the context Claude relies on for follow-up turns.
+
+Block type: tool_use block
+Role: Assistant/Claude
+Contains: The tool name, a unique ID, and the input arguments Claude wants passed to your function
+Critical rule: Every tool_use block must be answered by a tool_result block in the immediately following user turn. The tool_result must carry the same ID. Without that pairing, the API rejects the next request.
+
+Block type: tool_result block
+Role: User
+Contains: Matching tool_use ID, the result content, and an optional is_error flag set to true when the tool call fails
+Critical rule: The tool_use_id value must match the original tool_use block exactly. Claude uses this ID to connect each result back to the call that produced it, which matters when a single assistant turn issues multiple tool calls and the results arrive in a different order.
+
+Block type: thinking block
+Role: Assistant (extended thinking only)/Claude
+Contains: Claude’s internal reasoning, visible only when extended thinking is enabled
+Critical rule: The block must be passed back to the API unchanged in subsequent turns. The signature verifies the reasoning hasn’t been modified, so any edit or summary breaks the signature and the API rejects the message. Redacted thinking blocks follow the same rule: pass them back as received, even though the content is encrypted and not human-readable.
+
+The critical invariant is that every tool_use block from an assistant turn must have a corresponding tool_result block in the immediately following user turn. Missing tool_result blocks, or tool_result blocks that appear in a later turn rather than the immediately following user turn, cause an API validation error.
+
+2-3-3. Schema anatomy: What Claude reads to make a tool selection decision
+A tool schema has three parts, including name, description, and input_schema. The description determines whether Claude selects the tool correctly or not.
+
+Name: A short identifier that should be specific. For example, get_account_balance is more useful to Claude than get_data.
+Description: A critical part that Claude reads to decide whether a tool is required or not. You should always write the description in two parts, including when to and when not to use the tool:
+A description that says "use this to find information" will cause wrong selections because Claude cannot distinguish it from any other tool that retrieves something.
+A description that says "use this to retrieve the current balance for a specific account ID and do not use this for transaction history" gives Claude an exclusion condition to work with and is appropriately descriptive.
+input_schema: Defines the parameters (the inputs your tool function accepts) using JSON Schema.
+You should mark parameters as required when Claude requires them to call the tool correctly.
+You can mark parameters as optional when the tool can operate without them. Overlapping parameter types between tools is the most common source of wrong-tool calls.
+
+2-3-4. Decision table: Schema design choices
+The schema is what Claude reads to decide which tool to call, what arguments to pass in, and whether it has enough information to respond. A schema that’s vague, under-described, or missing required fields will produce tool calls that look syntactically correct but pick the wrong tool, pass malformed inputs, or loop unnecessarily. The five decisions below determine whether your implementation behaves predictably under real conditions. The table notes where sequential and parallel tool-calling diverge.
+Decision: Subtask dependency
+How to handle it: When one tool’s output feeds the next, the calls have to run in sequence because the second call cannot be built until the first result comes back. When the subtasks are independent of each other, you can structure the tool set so Claude issues multiple tool_use blocks in a single turn and your code runs them concurrently.
+Why it matters: This is the one decision that changes how you design the schema. Current Claude models default to parallel calls when calls are independent. Where a real dependency exists, model it as separate turns so the first result is available before the next call is built. Use disable_parallel_tool_use to force one tool call per turn if needed.
+
+Decision: Required fields
+How to handle it: Mark a field as required only when the call doesn’t make sense without it. Place these in the required array of the input schema.
+Why it matters: Marking everything required forces Claude to fabricate values for fields it has no basis to fill in. The required array is how you tell Claude which inputs are non-negotiable.
+
+Decision: Optional fields
+How to handle it: Use optional fields for parameters with sensible defaults or where absence carries meaning. Leave them out of the required array and give them defaults in the function signature.
+Why it matters: Optional fields let Claude omit information it doesn’t have, instead of guessing. If a field is optional but marked required, every call must invent a value, which can cause bad inputs.
+
+Decision: Description length
+How to handle it: Write three to four sentences per tool covering what it does, when Claude should reach for it, and what it returns. Include examples of valid inputs where format matters.
+Why it matters: If the description is too short, Claude guesses because there isn’t enough signal to distinguish your tool from others. If the description is too long, the trigger conditions get buried under detail Claude doesn’t reference at decision time.
+
+Decision: Overlapping parameter types
+How to handle it: When two tools accept the same parameter shape, add disambiguating language to each description that names the domain or trigger the tool is meant for.
+Why it matters: Claude routes on name plus description, with parameter types as a secondary signal. When signatures are identical, routing collapses to description alone, and similar-sounding descriptions become indistinguishable.
+Worked example: A schema that causes wrong-tool selection and the fix
+This is an illustrative example based on common patterns observed in tool-use implementations. Tool names, descriptions, and test results are constructed to demonstrate the selection-disambiguation principle, not drawn from a specific production system.
+
+A developer registers two tools, including search_knowledge_base and get_cached_result. The tool names are distinct, but Claude’s tool selection weighs descriptions heavily; when descriptions overlap, name alone is not sufficient to disambiguate. Both have descriptions that start with "use this to find information." Without exclusion conditions, Claude frequently selected the wrong tool on ambiguous inputs during development testing.
+
+The problem is that both descriptions look identical to Claude at the point where the selection decision is made. The fix is adding an additional sentence per description:
+
+search_knowledge_base: "Use this to search the knowledge base when the user asks a question that requires looking up current information. Do not use this if the result of a prior search in this session already covers the question."
+
+get_cached_result: "Use this to retrieve a result that was already fetched during this session. Only use this if search_knowledge_base was called earlier in this conversation for the same query."
+The exclusion conditions give Claude a decision rule rather than two identical-looking options. These conditions rely on complete conversation history being passed in each request. If prior turns are truncated or dropped, Claude cannot evaluate them and the exclusion logic silently fails.
+
+Every additional tool you register increases the surface area Claude has to reason over, so this discipline only pays off when the underlying tools are distinct. The table below shows where exclusion-condition disambiguation helps and where a different approach is warranted.
+
+Handles well
+Routing Claude to the right tool reliably when descriptions are specific and exclusion conditions are stated.
+
+Poor fit.
+Two tools that do similar things and need ever-longer descriptions to keep apart: at that point, merge them into one tool with a type parameter instead.
+
+2-3-5. When someone else has already written your tools: MCP as an alternative to manual schema authoring
+Everything in the previous sections assumes you are writing the tool schemas yourself: name, description, input_schema, and the function that executes when Claude issues a tool_use block. For many integrations, you do not need to do that. The Model Context Protocol, MCP, is a standardized communication layer that moves tool definitions and execution out of your application code and into dedicated servers. When an MCP server exists for the service you want to reach, you can connect directly to the MCP server rather than building the integration yourself.
+
+Take a GitHub integration as a concrete case. GitHub exposes repositories, pull requests, issues, projects, and more. To build a complete integration using the tool schema approach from this module, you would need to write a schema and an execution function for every piece of that functionality and maintain it as GitHub’s API evolves. An MCP server for GitHub has already done that. So, your application connects to the server, receives the full list of available tools, and Claude selects among them using the same description-based routing you have already been working with. The underlying mechanism is identical, but what changes is who wrote it and who owns the tool definitions.
+
+How MCP fits into the tool-use loop
+The loop you built earlier in this module does not change when you introduce MCP. Claude still issues a tool_use block, your application still executes the tool and returns a tool_result, and the message block pairing rules still apply. The difference is in the setup step. Instead of registering schemas you wrote, your MCP client sends a ListToolsRequest to the MCP server, receives the full tool list back, and passes those definitions to Claude. From Claude’s perspective, those tools are indistinguishable from ones you authored manually.
+
+One practical implication worth noting: MCP servers add tool definitions to the context window even when the tools are not being used in the current turn. If you connect several servers at once, the tool definitions themselves consume budget before the first message arrives. The schema design discipline from earlier in this module applies here too. Register only the servers you are actively using, and check context cost against your window limit if you are connecting multiple servers in the same session.
+
+If you are using the API MCP Connector, you control loading cost through an mcp_toolset object in the tools array. The mcp_toolset carries a default_config block that applies to every tool on the server, and you can override individual tools through configs keyed by tool name. Two settings matter for context cost:
+
+The defer_loading boolean, set inside default_config or a per-tool entry in configs, delays loading a tool definition until the model needs it, which reduces upfront context cost when you connect a server with a large tool list.
+The enabled boolean turns individual tools on or off, so you can register a server but expose only the tools you want the model to see. The MCP Connector requires the mcp-client-2025-11-20 beta header to be set on the request.
+Without that header, the mcp_toolset configuration will not apply as described here.
+
+The other piece worth knowing at this stage is how the client actually talks to the server. MCP runs over one of two transports, and which one you use depends on where the server lives. Local servers use stdio and your application spawns the server as a subprocess and communicates over standard input and output. Remote servers use Streamable HTTP and your application connects over the network via HTTP, using POST for client-to-server messages and an optional GET-based SSE stream for server-initiated messages. An older SSE-only transport exists but is deprecated, and new integrations should use Streamable HTTP. One constraint worth flagging if you are using Anthropic’s MCP connector in the API: only HTTP-exposed servers are supported through the connector, and stdio servers require managing the MCP client connection yourself via the SDK. Once the connection is established and tool definitions are received, your application code treats both transports identically.
+
+Use MCP when
+A well-maintained MCP server already exists for the service you need (check that it covers the specific operations you require and is actively maintained against the service’s current API. Writing and owning those schemas yourself adds implementation overhead for no additional capability. Note that the Claude API MCP Connector only supports remote servers. Local stdio servers require Claude Desktop or Claude Code as the client; they cannot be connected directly through the API.
+
+Write schemas manually when
+No MCP server covers your use case, or when you need precise control over tool scope and description quality that a general-purpose server does not provide. Before defaulting to manual schemas for scope control, note that the API MCP Connector supports allowlisting and denylisting specific tools per server via MCPToolset configuration. Manual authoring may still be warranted for description quality, but not always for scope.
+
+Use both when
+Connect to an MCP server for breadth then apply the description-tuning discipline from earlier in this module to the specific tools you are actively routing to. MCP and manual schema authoring are not mutually exclusive as the server gives you coverage, and your descriptions give you precision where it matters. Apply tool allowlisting via MCPToolset to limit the surface area Claude reasons over before layering in description tuning. Narrowing the tool set and sharpening the descriptions are two separate levers, and you should use both.
 `;
 
 export const quizSections: QuizSection[] = [
@@ -250,20 +375,10 @@ export const quizSections: QuizSection[] = [
     items: [
       item("2-1-3. When to reach for each technique", "2-1-3. 각 기법을 언제 사용할지"),
       item("Now, let's understand more about each of these techniques and when each one applies:", "이제 각 기법과 그것이 언제 적용되는지 더 자세히 이해해 봅시다."),
-      item("1. System prompts carry the behavioral contract for the whole session.", "1. 시스템 프롬프트는 전체 세션의 행동 계약을 담습니다."),
-      item("Write them once and treat them as your persistent instruction layer.", "한 번 작성한 뒤 지속적인 지시 계층으로 다루세요."),
-      item("They define Claude's role, the output format, and any rules that must not change between conversations.", "그것들은 Claude의 역할, 출력 형식, 그리고 대화 사이에서도 바뀌면 안 되는 규칙을 정의합니다."),
-      item("2. XML tags are used when the prompt mixes inputs with instructions.", "2. XML 태그는 프롬프트가 입력과 지시를 섞을 때 사용됩니다."),
-      item("A prompt that asks Claude to debug code using provided documentation is a good example; without tags, the code and the documentation look the same to Claude.", "제공된 문서를 사용해 Claude에게 코드를 디버그하라고 요청하는 프롬프트가 좋은 예입니다. 태그가 없으면 코드와 문서가 Claude에게 똑같이 보입니다."),
-      item("Wrap them with descriptive tag names like <my_code> and <docs> and the boundary becomes unambiguous.", "<my_code>와 <docs> 같은 설명적인 태그 이름으로 감싸면 경계가 명확해집니다."),
-      item("You do not need to use official XML tag names; descriptive names that match your content work best.", "공식 XML 태그 이름을 사용할 필요는 없습니다. 내용에 맞는 설명적인 이름이 가장 잘 작동합니다."),
-      item("3. Few-shot examples are considered useful because they show rather than just tell.", "3. 퓨샷 예시는 말로 설명하는 데 그치지 않고 직접 보여 주기 때문에 유용합니다."),
-      item("Instead of trying to describe the exact format you want, you provide one correct input-output pair and let Claude infer the pattern.", "원하는 정확한 형식을 설명하려고 하기보다, 올바른 입력-출력 쌍 하나를 제공하고 Claude가 패턴을 추론하게 합니다."),
-      item("To use this, wrap examples using consistent XML structure, for instance <sample_input> and <ideal_output>, so the boundary between example and prompt is clear.", "이를 사용하려면 <sample_input>과 <ideal_output>처럼 일관된 XML 구조로 예시를 감싸서 예시와 프롬프트 사이의 경계를 명확히 하세요."),
-      item("You can use some examples from your highest-scoring evaluation outputs rather than writing them from scratch.", "처음부터 새로 쓰기보다 가장 높은 점수를 받은 evaluation output에서 일부 예시를 사용할 수 있습니다."),
-      item("4. Output constraints are the last line of defense before Claude's response reaches your parser.", "4. 출력 제약 조건은 Claude의 응답이 parser에 도달하기 전 마지막 방어선입니다."),
-      item("You should specify exactly what you need, including field names, types, length limits, whether to include preamble, and what to do when data is absent.", "필드 이름, 타입, 길이 제한, preamble 포함 여부, 데이터가 없을 때 무엇을 할지 등 필요한 것을 정확히 지정해야 합니다."),
-      item("Use structured output features in cases when the format must be machine-readable.", "형식이 반드시 기계가 읽을 수 있어야 하는 경우에는 structured output 기능을 사용하세요.")
+      item("1. System prompts : System prompts carry the behavioral contract for the whole session. Write them once and treat them as your persistent instruction layer. They define Claude's role, the output format, and any rules that must not change between conversations.", "1. System prompts : 시스템 프롬프트는 전체 세션의 행동 계약을 담습니다. 한 번 작성한 뒤 지속적인 지시 계층으로 다루세요. 그것들은 Claude의 역할, 출력 형식, 그리고 대화 사이에서도 바뀌면 안 되는 규칙을 정의합니다."),
+      item("2. XML tags : XML tags are used when the prompt mixes inputs with instructions. A prompt that asks Claude to debug code using provided documentation is a good example; without tags, the code and the documentation look the same to Claude. Wrap them with descriptive tag names like <my_code> and <docs> and the boundary becomes unambiguous. You do not need to use official XML tag names; descriptive names that match your content work best.", "2. XML tags : XML 태그는 프롬프트가 입력과 지시를 섞을 때 사용됩니다. 제공된 문서를 사용해 Claude에게 코드를 디버그하라고 요청하는 프롬프트가 좋은 예입니다. 태그가 없으면 코드와 문서가 Claude에게 똑같이 보입니다. <my_code>와 <docs> 같은 설명적인 태그 이름으로 감싸면 경계가 명확해집니다. 공식 XML 태그 이름을 사용할 필요는 없습니다. 내용에 맞는 설명적인 이름이 가장 잘 작동합니다."),
+      item("3. Few-shot examples : Few-shot examples are considered useful because they show rather than just tell. Instead of trying to describe the exact format you want, you provide one correct input-output pair and let Claude infer the pattern. To use this, wrap examples using consistent XML structure, for instance <sample_input> and <ideal_output>, so the boundary between example and prompt is clear. You can use some examples from your highest-scoring evaluation outputs rather than writing them from scratch.", "3. Few-shot examples : 퓨샷 예시는 말로 설명하는 데 그치지 않고 직접 보여 주기 때문에 유용합니다. 원하는 정확한 형식을 설명하려고 하기보다, 올바른 입력-출력 쌍 하나를 제공하고 Claude가 패턴을 추론하게 합니다. 이를 사용하려면 <sample_input>과 <ideal_output>처럼 일관된 XML 구조로 예시를 감싸서 예시와 프롬프트 사이의 경계를 명확히 하세요. 처음부터 새로 쓰기보다 가장 높은 점수를 받은 evaluation output에서 일부 예시를 사용할 수 있습니다."),
+      item("4. Output constraints : Output constraints are the last line of defense before Claude's response reaches your parser. You should specify exactly what you need, including field names, types, length limits, whether to include preamble, and what to do when data is absent. Use structured output features in cases when the format must be machine-readable.", "4. Output constraints : 출력 제약 조건은 Claude의 응답이 parser에 도달하기 전 마지막 방어선입니다. 필드 이름, 타입, 길이 제한, preamble 포함 여부, 데이터가 없을 때 무엇을 할지 등 필요한 것을 정확히 지정해야 합니다. 형식이 반드시 기계가 읽을 수 있어야 하는 경우에는 structured output 기능을 사용하세요.")
     ]
   },
   {
@@ -392,6 +507,157 @@ export const quizSections: QuizSection[] = [
       item("The carry-back requirement in tool-use loops, and an effort setting you now must calibrate.", "도구 사용 루프에서의 carry-back 요구사항과 이제 조정해야 하는 effort 설정입니다."),
       item("Use a different approach", "다른 접근법을 써야 하는 경우"),
       item("For classification, extraction, and format tasks, a well-constrained prompt is cheaper and just as accurate.", "분류, 추출, 형식 작업에는 잘 제약된 프롬프트가 더 저렴하고 충분히 정확합니다.")
+    ]
+  },
+  {
+    id: "2-3-tool-use-and-schema-design",
+    title: "2-3. Tool-use and Schema Design",
+    items: [
+      item("2-3. Tool-use and Schema Design", "2-3. 도구 사용과 스키마 설계"),
+      item("Tool Schemas Claude Selects Correctly: Definition, Loop, and Calling Patterns", "Claude가 올바르게 선택하는 도구 스키마: 정의, 루프, 호출 패턴")
+    ]
+  },
+  {
+    id: "2-3-1-how-the-tool-use-loop-works",
+    title: "2-3-1. How the tool-use loop works",
+    items: [
+      item("2-3-1. How the tool-use loop works", "2-3-1. 도구 사용 루프가 작동하는 방식"),
+      item("The most common misconception about tool-use is that Claude runs the tools.", "도구 사용에 대한 가장 흔한 오해는 Claude가 도구를 실행한다고 생각하는 것입니다."),
+      item("Instead, Claude reads your tool definitions, decides which one fits the situation, and tells your application what to call it along with the required inputs.", "대신 Claude는 도구 정의를 읽고, 상황에 맞는 도구를 결정한 뒤, 필요한 입력과 함께 애플리케이션이 무엇을 호출해야 하는지 알려 줍니다."),
+      item("Your application executes the tool, gets the result, and sends it back; then Claude uses that result to continue.", "애플리케이션은 도구를 실행하고 결과를 받은 뒤 다시 보내며, Claude는 그 결과를 사용해 계속 진행합니다."),
+      item("This back-and-forth shouldn’t be ignored in production: if your application does not handle the return correctly, Claude never gets the data it asked for, and the loop breaks.", "프로덕션에서는 이 왕복 과정을 무시하면 안 됩니다. 애플리케이션이 반환을 올바르게 처리하지 않으면 Claude는 요청한 데이터를 받지 못하고 루프가 끊어집니다."),
+      item("The boundary between what Claude owns and what your code owns is where most tool-use bugs live.", "Claude가 담당하는 것과 코드가 담당하는 것 사이의 경계에 대부분의 도구 사용 버그가 있습니다."),
+      item("Here is the sequence to ensure proper implementation of tool-use.", "도구 사용을 올바르게 구현하기 위한 순서는 다음과 같습니다."),
+      item("Click each step to see what happens.", "각 단계를 클릭해서 어떤 일이 일어나는지 확인하세요."),
+      item("1. Define schema : You define a schema with a name, a description, and an input schema. Claude reads this to decide whether and when to call the tool.", "1. Define schema : 이름, 설명, 입력 스키마가 있는 스키마를 정의합니다. Claude는 이것을 읽고 도구를 호출할지, 언제 호출할지 결정합니다."),
+      item("2. Send message : Your code sends a message to Claude including the tool definitions and the user's input.", "2. Send message : 코드는 도구 정의와 사용자 입력을 포함한 메시지를 Claude에게 보냅니다."),
+      item("3. tool_use block : Claude issues a tool-use block containing the tool name, a unique ID, and the input arguments it wants to pass. The API response comes back with stop_reason: tool_use.", "3. tool_use block : Claude는 도구 이름, 고유 ID, 전달하려는 입력 인자를 포함한 tool-use block을 발행합니다. API 응답은 stop_reason: tool_use와 함께 돌아옵니다."),
+      item("4. Execute tool : Your code executes the tool using those arguments. Note that the assistant turn has already ended (Claude is not holding a connection open or waiting on your server). The model is stateless between calls. To continue, your code makes a fresh API request containing the prior messages plus the tool result.", "4. Execute tool : 코드는 그 인자를 사용해 도구를 실행합니다. 이때 assistant 턴은 이미 끝났다는 점에 주의하세요. Claude가 연결을 열어 두거나 서버를 기다리는 것이 아닙니다. 모델은 호출 사이에 상태를 유지하지 않습니다. 계속하려면 코드는 이전 메시지와 도구 결과를 포함한 새 API 요청을 만듭니다."),
+      item("5. Return result : You return the result in a tool-result block that references the original tool-use ID.", "5. Return result : 원래 tool-use ID를 참조하는 tool-result block으로 결과를 반환합니다."),
+      item("6. Claude continues : Claude continues using the tool result as context for its next response, either another tool-use block or a final end turn.", "6. Claude continues : Claude는 도구 결과를 다음 응답의 context로 사용해 계속 진행합니다. 다음 응답은 또 다른 tool-use block이거나 최종 종료 턴일 수 있습니다."),
+      item("It’s important to note that the loop is not automatic and you need to complete the fourth step.", "이 루프는 자동이 아니며 네 번째 단계를 직접 완료해야 한다는 점이 중요합니다."),
+      item("If the miss is systematic, the fix is in the schema definition step.", "오류가 반복적으로 발생한다면 해결책은 스키마 정의 단계에 있습니다.")
+    ]
+  },
+  {
+    id: "2-3-2-message-block-structure-in-a-tool-use-conversation",
+    title: "2-3-2. Message block structure in a tool-use conversation",
+    items: [
+      item("2-3-2. Message block structure in a tool-use conversation", "2-3-2. 도구 사용 대화에서의 메시지 블록 구조"),
+      item("A tool-use conversation is built out of structured blocks, not plain text.", "도구 사용 대화는 일반 텍스트가 아니라 구조화된 블록으로 만들어집니다."),
+      item("Each assistant turn and user turn is a list of blocks, and four block types do the work in a tool-use session.", "각 assistant 턴과 user 턴은 블록 목록이며, 도구 사용 세션에서는 네 가지 블록 타입이 핵심 역할을 합니다."),
+      item("A text block carries Claude’s prose response.", "text block은 Claude의 서술형 응답을 담습니다."),
+      item("A tool_use block carries a tool call, including the tool name, a unique ID, and the input arguments.", "tool_use block은 도구 이름, 고유 ID, 입력 인자를 포함한 도구 호출을 담습니다."),
+      item("A tool_result block carries what your code returned after running the tool.", "tool_result block은 코드가 도구를 실행한 뒤 반환한 내용을 담습니다."),
+      item("A thinking block carries Claude’s internal reasoning, and it only appears when extended thinking is enabled.", "thinking block은 Claude의 내부 reasoning을 담으며, extended thinking이 활성화된 경우에만 나타납니다."),
+      item("The API enforces a specific pairing between these blocks.", "API는 이 블록들 사이의 특정한 짝짓기를 강제합니다."),
+      item("Every tool_use block in an assistant turn must be answered by a tool_result block with a matching ID in the user turn that immediately follows.", "assistant 턴의 모든 tool_use block은 바로 다음 user 턴에서 일치하는 ID를 가진 tool_result block으로 응답되어야 합니다."),
+      item("If the IDs don’t match, if the result is missing, or if the turns are out of order, the request fails validation.", "ID가 일치하지 않거나, 결과가 없거나, 턴 순서가 맞지 않으면 요청은 validation에 실패합니다."),
+      item("This is not something you can fix by adjusting your prompt; it’s structural, and your code has to produce the sequence correctly on every request.", "이것은 프롬프트를 조정해서 고칠 수 있는 문제가 아닙니다. 구조적인 문제이며, 코드는 모든 요청에서 그 순서를 올바르게 만들어야 합니다."),
+      item("The table below summarizes each block type, what it contains, and the rule that governs how your code must handle it.", "아래 표는 각 블록 타입, 포함 내용, 그리고 코드가 그것을 처리할 때 따라야 하는 규칙을 요약합니다."),
+      item("Block type: text block\nRole: Assistant/Claude\nContains: Claude’s prose output\nCritical rule: Claude may return a text block alongside a tool_use block in the same turn. When it does, your code must preserve the full content array, including the text block, when appending that turn to conversation history. Dropping the text block corrupts the context Claude relies on for follow-up turns.", "Block type: text block\nRole: Assistant/Claude\nContains: Claude의 서술형 출력\nCritical rule: Claude는 같은 턴에서 tool_use block과 함께 text block을 반환할 수 있습니다. 그런 경우 코드는 그 턴을 대화 기록에 추가할 때 text block을 포함한 전체 content array를 보존해야 합니다. text block을 버리면 Claude가 후속 턴에서 의존하는 context가 손상됩니다."),
+      item("Block type: tool_use block\nRole: Assistant/Claude\nContains: The tool name, a unique ID, and the input arguments Claude wants passed to your function\nCritical rule: Every tool_use block must be answered by a tool_result block in the immediately following user turn. The tool_result must carry the same ID. Without that pairing, the API rejects the next request.", "Block type: tool_use block\nRole: Assistant/Claude\nContains: 도구 이름, 고유 ID, Claude가 함수에 전달하려는 입력 인자\nCritical rule: 모든 tool_use block은 바로 다음 user 턴에서 tool_result block으로 응답되어야 합니다. tool_result는 같은 ID를 가져야 합니다. 이 짝이 없으면 API는 다음 요청을 거부합니다."),
+      item("Block type: tool_result block\nRole: User\nContains: Matching tool_use ID, the result content, and an optional is_error flag set to true when the tool call fails\nCritical rule: The tool_use_id value must match the original tool_use block exactly. Claude uses this ID to connect each result back to the call that produced it, which matters when a single assistant turn issues multiple tool calls and the results arrive in a different order.", "Block type: tool_result block\nRole: User\nContains: 일치하는 tool_use ID, 결과 content, 그리고 도구 호출이 실패했을 때 true로 설정되는 선택적 is_error flag\nCritical rule: tool_use_id 값은 원래 tool_use block과 정확히 일치해야 합니다. Claude는 이 ID를 사용해 각 결과를 그것을 만든 호출과 연결하며, 하나의 assistant 턴이 여러 도구 호출을 발행하고 결과가 다른 순서로 도착할 때 중요합니다."),
+      item("Block type: thinking block\nRole: Assistant (extended thinking only)/Claude\nContains: Claude’s internal reasoning, visible only when extended thinking is enabled\nCritical rule: The block must be passed back to the API unchanged in subsequent turns. The signature verifies the reasoning hasn’t been modified, so any edit or summary breaks the signature and the API rejects the message. Redacted thinking blocks follow the same rule: pass them back as received, even though the content is encrypted and not human-readable.", "Block type: thinking block\nRole: Assistant (extended thinking only)/Claude\nContains: extended thinking이 활성화된 경우에만 보이는 Claude의 내부 reasoning\nCritical rule: 이 block은 이후 턴에서 변경 없이 API로 다시 전달되어야 합니다. signature는 reasoning이 수정되지 않았음을 검증하므로, 어떤 편집이나 요약도 signature를 깨뜨리고 API가 메시지를 거부하게 만듭니다. Redacted thinking block도 같은 규칙을 따릅니다. 내용이 암호화되어 사람이 읽을 수 없더라도 받은 그대로 다시 전달해야 합니다."),
+      item("The critical invariant is that every tool_use block from an assistant turn must have a corresponding tool_result block in the immediately following user turn.", "핵심 불변 조건은 assistant 턴의 모든 tool_use block이 바로 다음 user 턴에 대응하는 tool_result block을 가져야 한다는 것입니다."),
+      item("Missing tool_result blocks, or tool_result blocks that appear in a later turn rather than the immediately following user turn, cause an API validation error.", "tool_result block이 없거나, 바로 다음 user 턴이 아니라 더 나중 턴에 나타나면 API validation error가 발생합니다.")
+    ]
+  },
+  {
+    id: "2-3-3-schema-anatomy-what-claude-reads-to-make-a-tool-selection-decision",
+    title: "2-3-3. Schema anatomy: What Claude reads to make a tool selection decision",
+    items: [
+      item("2-3-3. Schema anatomy: What Claude reads to make a tool selection decision", "2-3-3. 스키마 해부: Claude가 도구 선택 결정을 내릴 때 읽는 것"),
+      item("A tool schema has three parts, including name, description, and input_schema.", "도구 스키마는 name, description, input_schema라는 세 부분으로 구성됩니다."),
+      item("The description determines whether Claude selects the tool correctly or not.", "description은 Claude가 도구를 올바르게 선택하는지 여부를 결정합니다."),
+      item("Name: A short identifier that should be specific. For example, get_account_balance is more useful to Claude than get_data.", "Name: 구체적이어야 하는 짧은 식별자입니다. 예를 들어 get_account_balance는 get_data보다 Claude에게 더 유용합니다."),
+      item("Description: A critical part that Claude reads to decide whether a tool is required or not. You should always write the description in two parts, including when to and when not to use the tool:", "Description: Claude가 도구가 필요한지 아닌지 판단하기 위해 읽는 핵심 부분입니다. description은 항상 도구를 언제 써야 하는지와 언제 쓰지 말아야 하는지를 포함한 두 부분으로 작성해야 합니다."),
+      item("A description that says \"use this to find information\" will cause wrong selections because Claude cannot distinguish it from any other tool that retrieves something.", "\"use this to find information\"이라고만 쓰인 description은 Claude가 그것을 다른 검색 도구와 구별할 수 없기 때문에 잘못된 선택을 유발합니다."),
+      item("A description that says \"use this to retrieve the current balance for a specific account ID and do not use this for transaction history\" gives Claude an exclusion condition to work with and is appropriately descriptive.", "\"특정 account ID의 현재 잔액을 가져올 때 사용하고 transaction history에는 사용하지 말라\"는 description은 Claude가 활용할 수 있는 제외 조건을 제공하며 적절히 설명적입니다."),
+      item("input_schema: Defines the parameters (the inputs your tool function accepts) using JSON Schema.", "input_schema: JSON Schema를 사용해 도구 함수가 받는 입력인 parameters를 정의합니다."),
+      item("You should mark parameters as required when Claude requires them to call the tool correctly.", "Claude가 도구를 올바르게 호출하는 데 필요한 parameter는 required로 표시해야 합니다."),
+      item("You can mark parameters as optional when the tool can operate without them.", "도구가 해당 parameter 없이도 작동할 수 있다면 optional로 표시할 수 있습니다."),
+      item("Overlapping parameter types between tools is the most common source of wrong-tool calls.", "도구 간 parameter type이 겹치는 것은 잘못된 도구 호출의 가장 흔한 원인입니다.")
+    ]
+  },
+  {
+    id: "2-3-4-decision-table-schema-design-choices",
+    title: "2-3-4. Decision table: Schema design choices",
+    items: [
+      item("2-3-4. Decision table: Schema design choices", "2-3-4. 결정 표: 스키마 설계 선택지"),
+      item("The schema is what Claude reads to decide which tool to call, what arguments to pass in, and whether it has enough information to respond.", "스키마는 Claude가 어떤 도구를 호출할지, 어떤 인자를 전달할지, 응답할 충분한 정보가 있는지를 판단하기 위해 읽는 것입니다."),
+      item("A schema that’s vague, under-described, or missing required fields will produce tool calls that look syntactically correct but pick the wrong tool, pass malformed inputs, or loop unnecessarily.", "모호하거나 설명이 부족하거나 required field가 빠진 스키마는 문법적으로는 맞아 보이지만 잘못된 도구를 선택하거나, 잘못된 입력을 전달하거나, 불필요하게 루프를 도는 도구 호출을 만듭니다."),
+      item("The five decisions below determine whether your implementation behaves predictably under real conditions.", "아래 다섯 가지 결정은 실제 조건에서 구현이 예측 가능하게 동작하는지를 결정합니다."),
+      item("The table notes where sequential and parallel tool-calling diverge.", "이 표는 순차적 도구 호출과 병렬 도구 호출이 어디에서 달라지는지를 표시합니다."),
+      item("Decision: Subtask dependency\nHow to handle it: When one tool’s output feeds the next, the calls have to run in sequence because the second call cannot be built until the first result comes back. When the subtasks are independent of each other, you can structure the tool set so Claude issues multiple tool_use blocks in a single turn and your code runs them concurrently.\nWhy it matters: This is the one decision that changes how you design the schema. Current Claude models default to parallel calls when calls are independent. Where a real dependency exists, model it as separate turns so the first result is available before the next call is built. Use disable_parallel_tool_use to force one tool call per turn if needed.", "Decision: Subtask dependency\nHow to handle it: 한 도구의 출력이 다음 도구의 입력이 되는 경우, 첫 결과가 돌아오기 전에는 두 번째 호출을 만들 수 없으므로 호출은 순서대로 실행되어야 합니다. 하위 작업들이 서로 독립적이라면 Claude가 한 턴에서 여러 tool_use block을 발행하고 코드가 이를 동시에 실행하도록 도구 세트를 구성할 수 있습니다.\nWhy it matters: 이것은 스키마 설계 방식을 바꾸는 결정입니다. 현재 Claude 모델은 호출들이 독립적일 때 병렬 호출을 기본값으로 사용합니다. 실제 의존성이 있다면 첫 결과가 다음 호출을 만들기 전에 사용할 수 있도록 별도 턴으로 모델링하세요. 필요하면 disable_parallel_tool_use를 사용해 턴당 하나의 도구 호출로 강제할 수 있습니다."),
+      item("Decision: Required fields\nHow to handle it: Mark a field as required only when the call doesn’t make sense without it. Place these in the required array of the input schema.\nWhy it matters: Marking everything required forces Claude to fabricate values for fields it has no basis to fill in. The required array is how you tell Claude which inputs are non-negotiable.", "Decision: Required fields\nHow to handle it: 호출이 그 field 없이는 의미가 없을 때만 required로 표시하세요. input schema의 required array에 넣습니다.\nWhy it matters: 모든 것을 required로 표시하면 Claude는 근거 없이 값을 만들어 내야 합니다. required array는 어떤 입력이 타협 불가능한지를 Claude에게 알려 주는 방법입니다."),
+      item("Decision: Optional fields\nHow to handle it: Use optional fields for parameters with sensible defaults or where absence carries meaning. Leave them out of the required array and give them defaults in the function signature.\nWhy it matters: Optional fields let Claude omit information it doesn’t have, instead of guessing. If a field is optional but marked required, every call must invent a value, which can cause bad inputs.", "Decision: Optional fields\nHow to handle it: 합리적인 기본값이 있거나 없는 것 자체가 의미를 갖는 parameter에는 optional field를 사용하세요. required array에서 제외하고 함수 signature에 기본값을 두세요.\nWhy it matters: Optional field는 Claude가 모르는 정보를 추측하는 대신 생략할 수 있게 합니다. optional이어야 할 field가 required로 표시되면 모든 호출이 값을 지어내야 하며, 나쁜 입력을 만들 수 있습니다."),
+      item("Decision: Description length\nHow to handle it: Write three to four sentences per tool covering what it does, when Claude should reach for it, and what it returns. Include examples of valid inputs where format matters.\nWhy it matters: If the description is too short, Claude guesses because there isn’t enough signal to distinguish your tool from others. If the description is too long, the trigger conditions get buried under detail Claude doesn’t reference at decision time.", "Decision: Description length\nHow to handle it: 도구마다 무엇을 하는지, Claude가 언제 사용해야 하는지, 무엇을 반환하는지를 포함해 세 문장 또는 네 문장으로 작성하세요. 형식이 중요한 경우 유효한 입력 예시를 포함하세요.\nWhy it matters: description이 너무 짧으면 다른 도구와 구별할 신호가 부족해 Claude가 추측합니다. 너무 길면 결정 시점에 Claude가 참고하지 않는 세부 정보 속에 trigger condition이 묻힙니다."),
+      item("Decision: Overlapping parameter types\nHow to handle it: When two tools accept the same parameter shape, add disambiguating language to each description that names the domain or trigger the tool is meant for.\nWhy it matters: Claude routes on name plus description, with parameter types as a secondary signal. When signatures are identical, routing collapses to description alone, and similar-sounding descriptions become indistinguishable.", "Decision: Overlapping parameter types\nHow to handle it: 두 도구가 같은 parameter shape을 받는다면, 각 description에 해당 도구의 domain이나 trigger를 명명하는 구별 문구를 추가하세요.\nWhy it matters: Claude는 name과 description을 기준으로 route하고, parameter type은 보조 신호로 사용합니다. signature가 동일하면 routing은 description에만 의존하게 되며, 비슷하게 들리는 description은 구별되지 않습니다."),
+      item("Worked example: A schema that causes wrong-tool selection and the fix", "작업 예시: 잘못된 도구 선택을 유발하는 스키마와 해결책"),
+      item("This is an illustrative example based on common patterns observed in tool-use implementations.", "이것은 도구 사용 구현에서 관찰되는 일반적인 패턴을 바탕으로 한 예시입니다."),
+      item("Tool names, descriptions, and test results are constructed to demonstrate the selection-disambiguation principle, not drawn from a specific production system.", "도구 이름, description, test result는 특정 production system에서 가져온 것이 아니라 selection-disambiguation 원칙을 보여 주기 위해 구성된 것입니다."),
+      item("A developer registers two tools, including search_knowledge_base and get_cached_result.", "한 개발자가 search_knowledge_base와 get_cached_result를 포함한 두 도구를 등록합니다."),
+      item("The tool names are distinct, but Claude’s tool selection weighs descriptions heavily; when descriptions overlap, name alone is not sufficient to disambiguate.", "도구 이름은 서로 다르지만 Claude의 도구 선택은 description에 큰 비중을 둡니다. description이 겹치면 이름만으로는 충분히 구별되지 않습니다."),
+      item("Both have descriptions that start with \"use this to find information.\"", "두 도구 모두 \"use this to find information\"으로 시작하는 description을 갖고 있습니다."),
+      item("Without exclusion conditions, Claude frequently selected the wrong tool on ambiguous inputs during development testing.", "제외 조건이 없으면 개발 테스트 중 모호한 입력에서 Claude가 자주 잘못된 도구를 선택했습니다."),
+      item("The problem is that both descriptions look identical to Claude at the point where the selection decision is made.", "문제는 선택 결정이 이루어지는 시점에 두 description이 Claude에게 동일하게 보인다는 것입니다."),
+      item("The fix is adding an additional sentence per description:", "해결책은 각 description에 추가 문장을 넣는 것입니다."),
+      item("search_knowledge_base: \"Use this to search the knowledge base when the user asks a question that requires looking up current information. Do not use this if the result of a prior search in this session already covers the question.\"", "search_knowledge_base: \"사용자가 최신 정보를 찾아야 하는 질문을 할 때 knowledge base를 검색하기 위해 사용하세요. 이 세션의 이전 검색 결과가 이미 질문을 다룬다면 사용하지 마세요.\""),
+      item("get_cached_result: \"Use this to retrieve a result that was already fetched during this session. Only use this if search_knowledge_base was called earlier in this conversation for the same query.\"", "get_cached_result: \"이 세션 중 이미 가져온 결과를 검색하기 위해 사용하세요. 같은 query에 대해 이 대화에서 search_knowledge_base가 이전에 호출된 경우에만 사용하세요.\""),
+      item("The exclusion conditions give Claude a decision rule rather than two identical-looking options.", "제외 조건은 Claude에게 똑같아 보이는 두 선택지가 아니라 결정 규칙을 제공합니다."),
+      item("These conditions rely on complete conversation history being passed in each request.", "이 조건들은 각 요청에 완전한 대화 기록이 전달되는 것에 의존합니다."),
+      item("If prior turns are truncated or dropped, Claude cannot evaluate them and the exclusion logic silently fails.", "이전 턴이 잘리거나 누락되면 Claude는 그것들을 평가할 수 없고 제외 논리는 조용히 실패합니다."),
+      item("Every additional tool you register increases the surface area Claude has to reason over, so this discipline only pays off when the underlying tools are distinct.", "추가로 등록하는 모든 도구는 Claude가 reasoning해야 하는 표면적을 늘리므로, 이 규율은 underlying tool들이 서로 구별될 때만 효과가 있습니다."),
+      item("The table below shows where exclusion-condition disambiguation helps and where a different approach is warranted.", "아래 표는 제외 조건을 통한 disambiguation이 도움이 되는 경우와 다른 접근이 필요한 경우를 보여 줍니다."),
+      item("Handles well", "잘 처리하는 경우"),
+      item("Routing Claude to the right tool reliably when descriptions are specific and exclusion conditions are stated.", "description이 구체적이고 제외 조건이 명시되어 있을 때 Claude를 올바른 도구로 안정적으로 routing하는 경우입니다."),
+      item("Poor fit.", "잘 맞지 않는 경우."),
+      item("Two tools that do similar things and need ever-longer descriptions to keep apart: at that point, merge them into one tool with a type parameter instead.", "비슷한 일을 하는 두 도구를 구별하기 위해 description이 계속 길어져야 하는 경우입니다. 그 시점에서는 type parameter를 가진 하나의 도구로 병합하는 편이 낫습니다.")
+    ]
+  },
+  {
+    id: "2-3-5-when-someone-else-has-already-written-your-tools-mcp-as-an-alternative-to-manual-schema-authoring",
+    title: "2-3-5. When someone else has already written your tools: MCP as an alternative to manual schema authoring",
+    items: [
+      item("2-3-5. When someone else has already written your tools: MCP as an alternative to manual schema authoring", "2-3-5. 다른 사람이 이미 도구를 작성해 둔 경우: 수동 스키마 작성의 대안으로서 MCP"),
+      item("Everything in the previous sections assumes you are writing the tool schemas yourself: name, description, input_schema, and the function that executes when Claude issues a tool_use block.", "앞선 섹션들은 name, description, input_schema, 그리고 Claude가 tool_use block을 발행했을 때 실행되는 함수를 직접 작성한다고 가정합니다."),
+      item("For many integrations, you do not need to do that.", "많은 integration에서는 그렇게 할 필요가 없습니다."),
+      item("The Model Context Protocol, MCP, is a standardized communication layer that moves tool definitions and execution out of your application code and into dedicated servers.", "Model Context Protocol, MCP는 도구 정의와 실행을 애플리케이션 코드 밖의 전용 서버로 옮기는 표준화된 통신 계층입니다."),
+      item("When an MCP server exists for the service you want to reach, you can connect directly to the MCP server rather than building the integration yourself.", "사용하려는 서비스에 대한 MCP 서버가 있다면 integration을 직접 만들기보다 MCP 서버에 직접 연결할 수 있습니다."),
+      item("Take a GitHub integration as a concrete case.", "GitHub integration을 구체적인 사례로 보겠습니다."),
+      item("GitHub exposes repositories, pull requests, issues, projects, and more.", "GitHub는 repositories, pull requests, issues, projects 등을 제공합니다."),
+      item("To build a complete integration using the tool schema approach from this module, you would need to write a schema and an execution function for every piece of that functionality and maintain it as GitHub’s API evolves.", "이 모듈의 tool schema 접근법으로 완전한 integration을 만들려면 각 기능마다 schema와 execution function을 작성하고 GitHub API가 변할 때마다 유지보수해야 합니다."),
+      item("An MCP server for GitHub has already done that.", "GitHub용 MCP 서버는 이미 그 일을 해 두었습니다."),
+      item("So, your application connects to the server, receives the full list of available tools, and Claude selects among them using the same description-based routing you have already been working with.", "따라서 애플리케이션은 서버에 연결해 사용 가능한 도구 전체 목록을 받고, Claude는 지금까지 다뤄 온 description 기반 routing으로 그중에서 선택합니다."),
+      item("The underlying mechanism is identical, but what changes is who wrote it and who owns the tool definitions.", "기저 메커니즘은 동일하지만, 달라지는 것은 누가 작성했고 누가 도구 정의를 소유하느냐입니다."),
+      item("How MCP fits into the tool-use loop", "MCP가 도구 사용 루프에 들어맞는 방식"),
+      item("The loop you built earlier in this module does not change when you introduce MCP.", "MCP를 도입해도 이 모듈 앞에서 만든 루프는 바뀌지 않습니다."),
+      item("Claude still issues a tool_use block, your application still executes the tool and returns a tool_result, and the message block pairing rules still apply.", "Claude는 여전히 tool_use block을 발행하고, 애플리케이션은 여전히 도구를 실행해 tool_result를 반환하며, message block pairing 규칙도 그대로 적용됩니다."),
+      item("The difference is in the setup step.", "차이는 setup 단계에 있습니다."),
+      item("Instead of registering schemas you wrote, your MCP client sends a ListToolsRequest to the MCP server, receives the full tool list back, and passes those definitions to Claude.", "직접 작성한 schema를 등록하는 대신 MCP client가 MCP server에 ListToolsRequest를 보내고, 전체 도구 목록을 받은 뒤 그 정의를 Claude에 전달합니다."),
+      item("From Claude’s perspective, those tools are indistinguishable from ones you authored manually.", "Claude의 관점에서 이 도구들은 직접 작성한 도구와 구별되지 않습니다."),
+      item("One practical implication worth noting: MCP servers add tool definitions to the context window even when the tools are not being used in the current turn.", "주목할 실무적 함의가 하나 있습니다. MCP 서버는 현재 턴에서 도구가 사용되지 않더라도 tool definition을 context window에 추가합니다."),
+      item("If you connect several servers at once, the tool definitions themselves consume budget before the first message arrives.", "여러 서버를 한 번에 연결하면 첫 메시지가 오기 전부터 tool definition 자체가 budget을 소비합니다."),
+      item("The schema design discipline from earlier in this module applies here too.", "이 모듈 앞에서 다룬 schema design 규율은 여기에도 적용됩니다."),
+      item("Register only the servers you are actively using, and check context cost against your window limit if you are connecting multiple servers in the same session.", "실제로 사용하는 서버만 등록하고, 같은 세션에서 여러 서버를 연결한다면 context cost를 window limit과 비교해 확인하세요."),
+      item("If you are using the API MCP Connector, you control loading cost through an mcp_toolset object in the tools array.", "API MCP Connector를 사용한다면 tools array 안의 mcp_toolset object로 loading cost를 제어합니다."),
+      item("The mcp_toolset carries a default_config block that applies to every tool on the server, and you can override individual tools through configs keyed by tool name.", "mcp_toolset은 서버의 모든 도구에 적용되는 default_config block을 가지며, tool name을 key로 하는 configs를 통해 개별 도구를 override할 수 있습니다."),
+      item("Two settings matter for context cost:", "context cost에는 두 가지 설정이 중요합니다."),
+      item("The defer_loading boolean, set inside default_config or a per-tool entry in configs, delays loading a tool definition until the model needs it, which reduces upfront context cost when you connect a server with a large tool list.", "default_config 또는 configs의 개별 tool entry 안에 설정하는 defer_loading boolean은 모델이 필요로 할 때까지 tool definition loading을 지연시켜, 큰 도구 목록을 가진 서버를 연결할 때 초기 context cost를 줄입니다."),
+      item("The enabled boolean turns individual tools on or off, so you can register a server but expose only the tools you want the model to see.", "enabled boolean은 개별 도구를 켜거나 끄므로, 서버는 등록하되 모델에게 보여 주고 싶은 도구만 노출할 수 있습니다."),
+      item("The MCP Connector requires the mcp-client-2025-11-20 beta header to be set on the request.", "MCP Connector는 요청에 mcp-client-2025-11-20 beta header가 설정되어 있어야 합니다."),
+      item("Without that header, the mcp_toolset configuration will not apply as described here.", "그 header가 없으면 mcp_toolset 설정은 여기 설명한 대로 적용되지 않습니다."),
+      item("The other piece worth knowing at this stage is how the client actually talks to the server.", "이 단계에서 알아둘 또 다른 부분은 client가 실제로 server와 통신하는 방식입니다."),
+      item("MCP runs over one of two transports, and which one you use depends on where the server lives.", "MCP는 두 transport 중 하나 위에서 동작하며, 어떤 것을 쓰는지는 server가 어디에 있는지에 달려 있습니다."),
+      item("Local servers use stdio and your application spawns the server as a subprocess and communicates over standard input and output.", "Local server는 stdio를 사용하며, 애플리케이션이 server를 subprocess로 실행하고 표준 입력과 출력으로 통신합니다."),
+      item("Remote servers use Streamable HTTP and your application connects over the network via HTTP, using POST for client-to-server messages and an optional GET-based SSE stream for server-initiated messages.", "Remote server는 Streamable HTTP를 사용하며, 애플리케이션은 HTTP 네트워크로 연결하고 client-to-server message에는 POST를, server-initiated message에는 선택적인 GET 기반 SSE stream을 사용합니다."),
+      item("An older SSE-only transport exists but is deprecated, and new integrations should use Streamable HTTP.", "이전 SSE-only transport도 있지만 deprecated 되었으며, 새로운 integration은 Streamable HTTP를 사용해야 합니다."),
+      item("One constraint worth flagging if you are using Anthropic’s MCP connector in the API: only HTTP-exposed servers are supported through the connector, and stdio servers require managing the MCP client connection yourself via the SDK.", "Anthropic API의 MCP connector를 사용한다면 주의할 제약이 있습니다. connector를 통해서는 HTTP로 노출된 server만 지원되며, stdio server는 SDK를 통해 MCP client connection을 직접 관리해야 합니다."),
+      item("Once the connection is established and tool definitions are received, your application code treats both transports identically.", "연결이 수립되고 tool definition을 받으면 애플리케이션 코드는 두 transport를 동일하게 다룹니다."),
+      item("Use MCP when\nA well-maintained MCP server already exists for the service you need (check that it covers the specific operations you require and is actively maintained against the service’s current API. Writing and owning those schemas yourself adds implementation overhead for no additional capability. Note that the Claude API MCP Connector only supports remote servers. Local stdio servers require Claude Desktop or Claude Code as the client; they cannot be connected directly through the API.", "Use MCP when\n필요한 서비스에 대해 잘 유지보수되는 MCP server가 이미 있을 때 사용하세요. 필요한 특정 작업을 지원하는지, 현재 service API에 맞춰 적극적으로 유지보수되는지 확인해야 합니다. 직접 schema를 작성하고 소유하는 것은 추가 capability 없이 구현 부담만 늘립니다. Claude API MCP Connector는 remote server만 지원합니다. Local stdio server는 Claude Desktop 또는 Claude Code가 client여야 하며 API를 통해 직접 연결할 수 없습니다."),
+      item("Write schemas manually when\nNo MCP server covers your use case, or when you need precise control over tool scope and description quality that a general-purpose server does not provide. Before defaulting to manual schemas for scope control, note that the API MCP Connector supports allowlisting and denylisting specific tools per server via MCPToolset configuration. Manual authoring may still be warranted for description quality, but not always for scope.", "Write schemas manually when\nuse case를 다루는 MCP server가 없거나, general-purpose server가 제공하지 않는 tool scope와 description quality에 대한 정밀한 제어가 필요할 때 직접 작성하세요. scope control 때문에 곧바로 manual schema를 선택하기 전에, API MCP Connector가 MCPToolset configuration을 통해 server별 특정 도구 allowlist와 denylist를 지원한다는 점을 기억하세요. description quality 때문에 manual authoring이 여전히 필요할 수 있지만, scope 때문에 항상 필요한 것은 아닙니다."),
+      item("Use both when\nConnect to an MCP server for breadth then apply the description-tuning discipline from earlier in this module to the specific tools you are actively routing to. MCP and manual schema authoring are not mutually exclusive as the server gives you coverage, and your descriptions give you precision where it matters. Apply tool allowlisting via MCPToolset to limit the surface area Claude reasons over before layering in description tuning. Narrowing the tool set and sharpening the descriptions are two separate levers, and you should use both.", "Use both when\n넓은 coverage를 위해 MCP server에 연결한 뒤, 실제로 routing하는 특정 도구에 대해 이 모듈 앞부분의 description-tuning 규율을 적용하세요. MCP와 manual schema authoring은 상호 배타적이지 않습니다. server는 coverage를 제공하고, description은 중요한 지점에서 precision을 제공합니다. description tuning을 더하기 전에 MCPToolset을 통한 tool allowlisting으로 Claude가 reasoning해야 할 surface area를 제한하세요. tool set을 좁히는 것과 description을 날카롭게 하는 것은 별개의 lever이며, 둘 다 사용해야 합니다.")
     ]
   }
 ];
