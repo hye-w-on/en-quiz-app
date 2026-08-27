@@ -276,6 +276,142 @@ No MCP server covers your use case, or when you need precise control over tool s
 
 Use both when
 Connect to an MCP server for breadth then apply the description-tuning discipline from earlier in this module to the specific tools you are actively routing to. MCP and manual schema authoring are not mutually exclusive as the server gives you coverage, and your descriptions give you precision where it matters. Apply tool allowlisting via MCPToolset to limit the surface area Claude reasons over before layering in description tuning. Narrowing the tool set and sharpening the descriptions are two separate levers, and you should use both.
+
+2-4. Streaming Responses
+Streaming responses and handling partial output without corrupting state
+Every request so far has waited for the whole response to arrive before doing anything with it. That's fine, until the response is long, or a user is sitting there staring at a blank screen. Streaming sends the response in pieces, sending them along as the model generates them. That makes things feel faster, but it also gives your code a new job: now you are tasked with assembling the final content yourself based on the series of outputs, and you need to be prepared if the series stops early.
+
+2-4-1. What streaming changes about the response
+In a non-streamed request, the API hands you one complete message with every content block, fully formed. In a streamed request, the API instead sends a series of events that describe the message as it's being built. Your code listens to that series and reassembles the blocks. The message you end up with is identical to what a non-streamed call would have given you, but the difference is that you have to assemble the pieces, and you decide what to do if the events stop before the message is finished.
+
+It helps to know what's not happening: the model isn't holding some live object open for you. Each event is its own small message describing a single change, a block started, some text or input got added to it, a block finished, the whole message finished. Your handler takes each event and applies it to the partial state it's been building up.
+
+2-4-2. The event sequence, and what your handler does with each
+Event: message_start
+What it signals: A new message is beginning. Carries the message shell with empty content and initial usage.
+What your handler does: Set up an empty content array to collect blocks in.
+
+Event: content_block_start
+What it signals: A new content block is opening, with its type (text, tool_use, or thinking) and index.
+What your handler does: Make a slot at that index for the named block type. A tool_use block opens with its name and id, but no input yet.
+
+Event: content_block_delta
+What it signals: An incremental piece of one block: a text fragment, a fragment of JSON input for a tool call, or a thinking fragment.
+What your handler does: Append the fragment to the block at that index. Tool-call inputs arrive as a partial JSON string spread across several deltas, you can't parse them until the block closes.
+
+Event: content_block_stop
+What it signals: The block at this index is complete.
+What your handler does: Finalize the block. For a tool_use block, this is the first moment the accumulated JSON input is complete enough to parse.
+
+Event: message_delta
+What it signals: Top-level changes to the message: the stop_reason and final usage counts.
+What your handler does: Record the stop_reason. It tells you whether the model finished or stopped for some other reason.
+
+Event: message_stop
+What it signals: The stream is complete.
+What your handler does: The assembled content array is now the finished message. From here, treat it exactly like a non-streamed response.
+
+2-4-3. The rule that keeps your state from getting corrupted: don't act on a partial block
+The tool_use block is the one to watch. Its input shows up as a partial JSON string spread across many content_block_delta events, and that string isn't valid JSON until content_block_stop closes the block. If your code tries to parse the input or run the tool before the block closes, it either chokes on malformed JSON or runs with half the arguments missing. So, the rule is simple: collect the deltas, and act only after content_block_stop for that block.
+
+The same discipline applies when you add a streamed assistant turn to your conversation history. Add it only after message_stop, with every block fully assembled. A turn built from a stream that got cut off partway is incomplete, and the tool_use pairing rules will reject your next request if a half-built tool_use block ends up in the history.
+
+2-4-4. When the stream stops early
+Streams sometimes fail in the middle. A dropped network connection, a timeout, or a client disconnect can end the event series before message_stop arrives. The failure that really bites is treating whatever you've collected so far as if it were complete. A partial text block shown to a user is just a cosmetic glitch and a partial tool_use block written into history is a structural problem that corrupts the next turn.
+
+Track completion on purpose. A turn is usable only once message_stop has arrived. Until then, treat what you've accumulated as provisional.
+On an interrupted stream, throw away the partial assistant turn instead of saving it to history, then retry the request. Committing a half-built turn is exactly what breaks the following request.
+Check the stop_reason from message_delta before you continue a loop. A stop_reason of tool_use means your assembled tool calls are ready to run; any other value means you're on a different path, not the tool path.
+Handles well
+Long responses and user-facing interfaces where showing output as it generates removes the blank-screen wait.
+
+Adds cost or complexity
+You assemble blocks yourself, you must not act on partial blocks, and you must handle mid-stream interruption explicitly.
+
+Use a different approach
+For short responses or backend jobs where no one is waiting on the output, a non-streamed call is simpler and removes the partial-state risk entirely.
+
+2-5. Context Engineering
+Model selection and keeping multi-turn sessions in budget
+You make one early choice: which model runs the workload. The Claude family covers a range of cost, latency, and capability tradeoffs, so the model you pick sets the price and speed floor that every later decision moves within.
+
+Once the model is set, the next constraint is the context window: the full span of text the model can take in at once, including your prompt, the conversation so far, and every tool result. Every tool result Claude returns gets appended to the context window and stays there for the rest of the session. In a single-turn prompt, that's invisible. In a multi-step agent session running ten or twenty tool calls, the window fills up fast, and once it fills, the agent either compacts (losing detail) or stalls before the task is done.
+
+So, the question for any agent workflow is whether you've decided in advance what goes into the context window, what comes back out as a summary, and what never enters at all. That set of choices is context engineering.
+
+2-5-1. Model selection: Start with Sonnet, move deliberately
+The Claude model family currently spans four tiers: Fable, Opus, Sonnet, and Haiku, each optimized for different cost, latency, and capability tradeoffs. Sonnet is the balanced default for most production workloads. Haiku is built for speed and cost efficiency on tasks that fit its capability envelope. Opus handles demanding work above the Sonnet envelope, and Fable is Anthropic's most capable model, built for the most demanding tasks including complex reasoning, advanced coding, research synthesis, and sophisticated agentic workflows where maximum intelligence is the priority. Confirm the current lineup and model identifiers against platform.claude.com/docs at build time.
+
+The default starting point is Sonnet. Move up to Opus only when an eval set tells you Sonnet isn't meeting your quality bar. Move down to Haiku only when an eval set tells you the quality regression is acceptable at your task, not just to save costs. Your decision to move models should always be a measured decision.
+
+2-5-2. The context window is not a free resource
+Think of the context window as the amount of space Claude can hold in working memory. Every message you send, every tool result you return, every document you inject, and every response Claude generates occupies space in that window. If a request is already larger than the context window, the Messages API rejects it with a validation error before generation; if a request fits but generation reaches the ceiling partway, current models return the output generated so far with a model_context_window_exceeded stop reason. Neither path silently truncates your oldest content. If you want a session to keep running past the window limit, your application must manage that itself by trimming or summarizing history before the next request goes out.
+
+In development, the window rarely fills because test inputs are small and sessions are short. In production, tool outputs are often three to five times longer than test fixtures, sessions run for more turns, and the window fills at turn eight rather than turn fifty, which means they fill earlier than development. The cost of not planning for this is a production outage.
+
+2-5-3. Four strategies for staying in budget
+The previous section made the case for moving state out of the live context window. The reason behind that is the budget. Every token in the window costs money on input and adds latency to the response, and a long session compounds both. The four strategies below are concrete ways to manage that budget, each suited to a different shape of conversation.
+Strategy: Pruning
+What it does: Lets you jump back to an earlier message and continue from there, removing the conversation that came after.
+When to apply: After Claude has gone down an unproductive path or accumulated debugging back-and-forth that won't help the next task.
+What continuity you lose: The work done after the rewind point is gone. If Claude learned something useful in that stretch, it has to relearn it.
+
+Strategy: Compaction (/compact in Claude Code; server-side compaction in the API, a beta strategy the platform performs for you, with manual summarization as the client-side alternative)
+What it does: Summarizes the conversation history into a condensed version that preserves the key information Claude has learned. The summary costs fewer tokens than the original turns.
+When to apply: When the session is approaching the context ceiling but you want to keep working on the same feature with the knowledge Claude has built up.
+What continuity you lose: Details can be lost in the summarization. Anything not captured in the summary will not be available to Claude going forward.
+
+Strategy: Clearing (/clear in Claude Code; new session in API)
+What it does: Starts a new conversation with empty context. Nothing from the previous session carries forward.
+When to apply: When the next task is completely different from the current one, and previous context would only introduce bias or confusion.
+What continuity you lose: All session context is gone. Anything Claude needs to remember across sessions has to be put somewhere persistent, like a CLAUDE.md file.
+
+Strategy: Subagent Handoffs
+What it does: Spawns a subagent in its own isolated context window with only the task description and system prompt it needs. The subagent does the work and returns a summary.
+When to apply: When a subtask is self-contained enough to delegate, especially exploration work where the journey clutters the main context but the answer is short.
+What continuity you lose: Visibility into how the subagent reached its conclusion. The intermediate steps are discarded with the subagent's context.
+
+2-5-4. Two more levers: prompt caching and token counting
+The four strategies above manage what enters the context window. Two API features reduce what you pay for what's already there.
+
+Prompt caching stores the processing work done on a stable prefix of your request so follow-up requests can reuse it instead of reprocessing the same tokens. The first request writes the prefix to cache; subsequent requests that send identical content up to that point pay a fraction of the original cost. The strongest candidates are parts of the request that rarely change across turns: a long system prompt, a large tool definition set, or a reference document you query repeatedly. You enable caching by marking a cache breakpoint with a cache_control field of type ephemeral on the last block you want cached. You can place up to four breakpoints. For multi-turn sessions with a stable system prompt and tool schemas, caching those prefixes once and reusing them across turns is the highest-leverage cost reduction available.
+
+Token counting lets you measure context pressure before a request goes out rather than after it fails. The count_tokens endpoint takes the same request body as a messages call and returns the token count without running inference. Use it during development to verify your context budget assumptions hold against real tool outputs, not just test fixtures, and in production to gate requests that would exceed the window before they error.
+
+2-5-5. The three places a RAG path can break
+The path has three places where it can go wrong: the chunking, the embedding match, and the assembly into the prompt.
+
+Chunking decides what a unit of retrievable context is. Split too small and a single chunk lacks the surrounding context to be useful. Split too large and one chunk dilutes the match with unrelated text. Sentence-based or section-based chunking with a little overlap is a reasonable default. The overlap matters because facts that cross a boundary would otherwise be split apart and become difficult to retrieve.
+The embedding match decides which chunks are returned. It uses a similarity search, so it retrieves content that is semantically close. This is not always what contains the exact term you need. A query for a specific identifier can miss the relevant chunk if a more semantically similar result outranks it. This is why a lexical match is sometimes run alongside the semantic one.
+The assembly step is where retrieved chunks must reach the model in the structure the prompt expects, otherwise the model answers from memory instead of from the retrieved text.
+The fetch-once path gives you a system you can reason about: you can inspect which chunks were retrieved for a query and test that retrieval directly. The cost is the infrastructure: the index that must be built, stored, kept in sync as the corpus changes, and secured wherever it lives. The search-across-rounds path removes that infrastructure and the staleness that comes with it, since the model reads the current files at query time, at the cost of spending more tokens and time per query and giving you a less inspectable process. For a stable reference corpus queried with simple lookups, the index is worth owning. For a changing corpus or multi-step questions, the iterative search is usually the simpler system despite costing more per query.
+
+The reported performance gain for single-agent agentic search over a retrieval index is a version-pinned figure. Confirm it against the reference layer at build time rather than relying on the number in this module.
+
+Now, let's understand a bit about two of the most common strategies: compaction and subagent handoffs.
+
+2-5-6. Applying compaction: What gets preserved depends on how you write the summarizer
+When you use /compact in Claude Code, the tool decides what to include in the summary. In the API, the documented primary strategy is server-side compaction (beta): the platform summarizes the conversation for you when it is configured on the request. When you instead implement manual compaction in an API session, you write the summarizer prompt yourself. That prompt determines what the agent will know in subsequent turns.
+
+Summarizer prompt says "summarize the conversation so far"
+Produces a general summary that may drop task-critical state, which files were modified, what decision was made at a branch point, and what error was encountered and resolved.
+Summarizer prompt says "summarize the conversation, preserving all file paths modified, all decisions made, and any errors encountered and their resolutions"
+Produces a summary the agent can use.
+This is not an edge case; task-critical state loss from an under-specified summarizer is one of the most common sources of multi-session agent failures.
+
+2-5-7. Subagent handoffs: Managing long-horizon tasks
+When a task is too large for a single context window, increasing the window is not a solution. The solution is to decompose the task and pass only the relevant context to each subagent. A subagent receives a scoped task and the minimum context it needs, the results of prior steps that are directly relevant, the tools it needs to complete its task, and clear exit conditions. The parent agent collects the results. This pattern keeps per-turn cost low and makes long-horizon tasks tractable.
+
+Like compaction and pruning, subagent handoffs add implementation overhead, so apply them only where context cost is a real constraint: a simple single-turn prompt or short workflow doesn't need this.
+
+Handles well
+Multi-step agent sessions that exceed the token budget and need decomposition. Best designed at the architecture stage rather than patched in as a production fix.
+
+Use a different approach
+Pipelines that never approach the window limit. Measure actual token usage against your model's context limit before adding management overhead.
+
+Forward pointer
+The strategies covered so far assume you know your context budget is under pressure and you are choosing a tool to manage it. The critical point here is not to know the pressure exists until the session breaks. A workload can pass every test in development and then fail in production for one reason: the tool output got bigger, the sessions got longer, and the context window that held twenty turns cleanly now fills at turn eight. The next section walks through exactly how that happens, using a worked postmortem of an agent that ran fine on test fixtures and then hit its ceiling once real documents started flowing through it.
 `;
 
 export const quizSections: QuizSection[] = [
@@ -658,6 +794,217 @@ export const quizSections: QuizSection[] = [
       item("Use MCP when\nA well-maintained MCP server already exists for the service you need (check that it covers the specific operations you require and is actively maintained against the service’s current API. Writing and owning those schemas yourself adds implementation overhead for no additional capability. Note that the Claude API MCP Connector only supports remote servers. Local stdio servers require Claude Desktop or Claude Code as the client; they cannot be connected directly through the API.", "Use MCP when\n필요한 서비스에 대해 잘 유지보수되는 MCP server가 이미 있을 때 사용하세요. 필요한 특정 작업을 지원하는지, 현재 service API에 맞춰 적극적으로 유지보수되는지 확인해야 합니다. 직접 schema를 작성하고 소유하는 것은 추가 capability 없이 구현 부담만 늘립니다. Claude API MCP Connector는 remote server만 지원합니다. Local stdio server는 Claude Desktop 또는 Claude Code가 client여야 하며 API를 통해 직접 연결할 수 없습니다."),
       item("Write schemas manually when\nNo MCP server covers your use case, or when you need precise control over tool scope and description quality that a general-purpose server does not provide. Before defaulting to manual schemas for scope control, note that the API MCP Connector supports allowlisting and denylisting specific tools per server via MCPToolset configuration. Manual authoring may still be warranted for description quality, but not always for scope.", "Write schemas manually when\nuse case를 다루는 MCP server가 없거나, general-purpose server가 제공하지 않는 tool scope와 description quality에 대한 정밀한 제어가 필요할 때 직접 작성하세요. scope control 때문에 곧바로 manual schema를 선택하기 전에, API MCP Connector가 MCPToolset configuration을 통해 server별 특정 도구 allowlist와 denylist를 지원한다는 점을 기억하세요. description quality 때문에 manual authoring이 여전히 필요할 수 있지만, scope 때문에 항상 필요한 것은 아닙니다."),
       item("Use both when\nConnect to an MCP server for breadth then apply the description-tuning discipline from earlier in this module to the specific tools you are actively routing to. MCP and manual schema authoring are not mutually exclusive as the server gives you coverage, and your descriptions give you precision where it matters. Apply tool allowlisting via MCPToolset to limit the surface area Claude reasons over before layering in description tuning. Narrowing the tool set and sharpening the descriptions are two separate levers, and you should use both.", "Use both when\n넓은 coverage를 위해 MCP server에 연결한 뒤, 실제로 routing하는 특정 도구에 대해 이 모듈 앞부분의 description-tuning 규율을 적용하세요. MCP와 manual schema authoring은 상호 배타적이지 않습니다. server는 coverage를 제공하고, description은 중요한 지점에서 precision을 제공합니다. description tuning을 더하기 전에 MCPToolset을 통한 tool allowlisting으로 Claude가 reasoning해야 할 surface area를 제한하세요. tool set을 좁히는 것과 description을 날카롭게 하는 것은 별개의 lever이며, 둘 다 사용해야 합니다.")
+    ]
+  },
+  {
+    id: "2-4-streaming-responses",
+    title: "2-4. Streaming Responses",
+    items: [
+      item("2-4. Streaming Responses", "2-4. 스트리밍 응답"),
+      item("Streaming responses and handling partial output without corrupting state", "상태를 손상시키지 않고 부분 출력을 처리하는 스트리밍 응답"),
+      item("Every request so far has waited for the whole response to arrive before doing anything with it.", "지금까지의 모든 요청은 전체 응답이 도착할 때까지 기다린 뒤에야 그것을 처리했습니다."),
+      item("That's fine, until the response is long, or a user is sitting there staring at a blank screen.", "응답이 길거나 사용자가 빈 화면을 바라보고 있는 상황이 아니라면 괜찮습니다."),
+      item("Streaming sends the response in pieces, sending them along as the model generates them.", "스트리밍은 모델이 생성하는 대로 응답을 조각으로 나누어 보냅니다."),
+      item("That makes things feel faster, but it also gives your code a new job: now you are tasked with assembling the final content yourself based on the series of outputs, and you need to be prepared if the series stops early.", "이렇게 하면 더 빠르게 느껴지지만 코드에는 새 일이 생깁니다. 이제 일련의 출력에 기반해 최종 content를 직접 조립해야 하며, 그 series가 일찍 멈출 경우에도 대비해야 합니다.")
+    ]
+  },
+  {
+    id: "2-4-1-what-streaming-changes-about-the-response",
+    title: "2-4-1. What streaming changes about the response",
+    items: [
+      item("2-4-1. What streaming changes about the response", "2-4-1. 스트리밍이 응답에서 바꾸는 것"),
+      item("In a non-streamed request, the API hands you one complete message with every content block, fully formed.", "non-streamed request에서는 API가 모든 content block이 완성된 하나의 complete message를 넘겨줍니다."),
+      item("In a streamed request, the API instead sends a series of events that describe the message as it's being built.", "streamed request에서는 API가 message가 만들어지는 과정을 설명하는 일련의 event를 보냅니다."),
+      item("Your code listens to that series and reassembles the blocks.", "코드는 그 series를 듣고 block들을 다시 조립합니다."),
+      item("The message you end up with is identical to what a non-streamed call would have given you, but the difference is that you have to assemble the pieces, and you decide what to do if the events stop before the message is finished.", "최종적으로 얻게 되는 message는 non-streamed call이 제공했을 것과 동일하지만, 차이는 조각들을 직접 조립해야 하고 message가 끝나기 전에 event가 멈추면 어떻게 할지 직접 결정해야 한다는 점입니다."),
+      item("It helps to know what's not happening: the model isn't holding some live object open for you.", "무슨 일이 일어나지 않는지를 아는 것도 도움이 됩니다. 모델이 사용자를 위해 어떤 live object를 열어 둔 것이 아닙니다."),
+      item("Each event is its own small message describing a single change, a block started, some text or input got added to it, a block finished, the whole message finished.", "각 event는 하나의 변경을 설명하는 작은 message입니다. block이 시작되거나, text 또는 input이 추가되거나, block이 끝나거나, 전체 message가 끝났다는 식입니다."),
+      item("Your handler takes each event and applies it to the partial state it's been building up.", "handler는 각 event를 받아 지금까지 쌓아 온 partial state에 적용합니다.")
+    ]
+  },
+  {
+    id: "2-4-2-the-event-sequence-and-what-your-handler-does-with-each",
+    title: "2-4-2. The event sequence, and what your handler does with each",
+    items: [
+      item("2-4-2. The event sequence, and what your handler does with each", "2-4-2. event sequence와 handler가 각 event를 처리하는 방식"),
+      item("Event: message_start\nWhat it signals: A new message is beginning. Carries the message shell with empty content and initial usage.\nWhat your handler does: Set up an empty content array to collect blocks in.", "Event: message_start\nWhat it signals: 새 message가 시작됩니다. 빈 content와 초기 usage를 가진 message shell을 담습니다.\nWhat your handler does: block을 모을 빈 content array를 설정합니다."),
+      item("Event: content_block_start\nWhat it signals: A new content block is opening, with its type (text, tool_use, or thinking) and index.\nWhat your handler does: Make a slot at that index for the named block type. A tool_use block opens with its name and id, but no input yet.", "Event: content_block_start\nWhat it signals: type(text, tool_use, thinking)과 index를 가진 새 content block이 열립니다.\nWhat your handler does: 해당 index에 그 block type을 위한 slot을 만듭니다. tool_use block은 name과 id를 가지고 열리지만 아직 input은 없습니다."),
+      item("Event: content_block_delta\nWhat it signals: An incremental piece of one block: a text fragment, a fragment of JSON input for a tool call, or a thinking fragment.\nWhat your handler does: Append the fragment to the block at that index. Tool-call inputs arrive as a partial JSON string spread across several deltas, you can't parse them until the block closes.", "Event: content_block_delta\nWhat it signals: 한 block의 incremental piece입니다. text fragment, tool call을 위한 JSON input fragment, 또는 thinking fragment일 수 있습니다.\nWhat your handler does: 그 fragment를 해당 index의 block에 append합니다. tool-call input은 여러 delta에 걸친 partial JSON string으로 도착하므로 block이 닫히기 전까지 parse할 수 없습니다."),
+      item("Event: content_block_stop\nWhat it signals: The block at this index is complete.\nWhat your handler does: Finalize the block. For a tool_use block, this is the first moment the accumulated JSON input is complete enough to parse.", "Event: content_block_stop\nWhat it signals: 이 index의 block이 완료되었습니다.\nWhat your handler does: block을 finalize합니다. tool_use block의 경우 누적된 JSON input이 parse하기에 충분히 완성되는 첫 순간입니다."),
+      item("Event: message_delta\nWhat it signals: Top-level changes to the message: the stop_reason and final usage counts.\nWhat your handler does: Record the stop_reason. It tells you whether the model finished or stopped for some other reason.", "Event: message_delta\nWhat it signals: message의 top-level change입니다. stop_reason과 final usage count를 담습니다.\nWhat your handler does: stop_reason을 기록합니다. 이것은 모델이 완료했는지 다른 이유로 멈췄는지를 알려 줍니다."),
+      item("Event: message_stop\nWhat it signals: The stream is complete.\nWhat your handler does: The assembled content array is now the finished message. From here, treat it exactly like a non-streamed response.", "Event: message_stop\nWhat it signals: stream이 완료되었습니다.\nWhat your handler does: 조립된 content array가 이제 finished message입니다. 여기서부터는 non-streamed response와 정확히 동일하게 다루면 됩니다.")
+    ]
+  },
+  {
+    id: "2-4-3-the-rule-that-keeps-your-state-from-getting-corrupted-dont-act-on-a-partial-block",
+    title: "2-4-3. The rule that keeps your state from getting corrupted: don't act on a partial block",
+    items: [
+      item("2-4-3. The rule that keeps your state from getting corrupted: don't act on a partial block", "2-4-3. 상태가 손상되지 않게 하는 규칙: partial block에 대해 행동하지 마세요"),
+      item("The tool_use block is the one to watch.", "주의해서 봐야 할 것은 tool_use block입니다."),
+      item("Its input shows up as a partial JSON string spread across many content_block_delta events, and that string isn't valid JSON until content_block_stop closes the block.", "그 input은 여러 content_block_delta event에 걸쳐 나뉜 partial JSON string으로 나타나며, content_block_stop이 block을 닫기 전까지는 유효한 JSON이 아닙니다."),
+      item("If your code tries to parse the input or run the tool before the block closes, it either chokes on malformed JSON or runs with half the arguments missing.", "block이 닫히기 전에 코드가 input을 parse하거나 tool을 실행하려 하면 malformed JSON에서 막히거나 argument가 절반쯤 빠진 상태로 실행됩니다."),
+      item("So, the rule is simple: collect the deltas, and act only after content_block_stop for that block.", "따라서 규칙은 간단합니다. delta를 모으고, 해당 block의 content_block_stop 이후에만 행동하세요."),
+      item("The same discipline applies when you add a streamed assistant turn to your conversation history.", "streamed assistant turn을 conversation history에 추가할 때도 같은 규율이 적용됩니다."),
+      item("Add it only after message_stop, with every block fully assembled.", "모든 block이 완전히 조립된 뒤 message_stop 이후에만 추가하세요."),
+      item("A turn built from a stream that got cut off partway is incomplete, and the tool_use pairing rules will reject your next request if a half-built tool_use block ends up in the history.", "중간에 끊긴 stream으로 만든 turn은 incomplete이며, half-built tool_use block이 history에 들어가면 tool_use pairing rule 때문에 다음 요청이 거부됩니다.")
+    ]
+  },
+  {
+    id: "2-4-4-when-the-stream-stops-early",
+    title: "2-4-4. When the stream stops early",
+    items: [
+      item("2-4-4. When the stream stops early", "2-4-4. stream이 일찍 멈출 때"),
+      item("Streams sometimes fail in the middle.", "stream은 때때로 중간에 실패합니다."),
+      item("A dropped network connection, a timeout, or a client disconnect can end the event series before message_stop arrives.", "network connection 끊김, timeout, client disconnect는 message_stop이 도착하기 전에 event series를 끝낼 수 있습니다."),
+      item("The failure that really bites is treating whatever you've collected so far as if it were complete.", "정말 문제가 되는 실패는 지금까지 모은 것을 complete인 것처럼 다루는 것입니다."),
+      item("A partial text block shown to a user is just a cosmetic glitch and a partial tool_use block written into history is a structural problem that corrupts the next turn.", "사용자에게 보이는 partial text block은 단순한 표시상의 문제지만, history에 기록된 partial tool_use block은 다음 turn을 손상시키는 구조적 문제입니다."),
+      item("Track completion on purpose.", "완료 여부를 의도적으로 추적하세요."),
+      item("A turn is usable only once message_stop has arrived.", "turn은 message_stop이 도착한 뒤에만 사용할 수 있습니다."),
+      item("Until then, treat what you've accumulated as provisional.", "그 전까지는 누적한 내용을 provisional로 다루세요."),
+      item("On an interrupted stream, throw away the partial assistant turn instead of saving it to history, then retry the request.", "interrupted stream에서는 partial assistant turn을 history에 저장하지 말고 버린 뒤 요청을 다시 시도하세요."),
+      item("Committing a half-built turn is exactly what breaks the following request.", "half-built turn을 commit하는 것이 바로 다음 요청을 깨뜨리는 원인입니다."),
+      item("Check the stop_reason from message_delta before you continue a loop.", "loop를 계속하기 전에 message_delta의 stop_reason을 확인하세요."),
+      item("A stop_reason of tool_use means your assembled tool calls are ready to run; any other value means you're on a different path, not the tool path.", "stop_reason이 tool_use라면 조립된 tool call을 실행할 준비가 된 것입니다. 다른 값이라면 tool path가 아니라 다른 경로에 있는 것입니다."),
+      item("Handles well\nLong responses and user-facing interfaces where showing output as it generates removes the blank-screen wait.", "Handles well\n긴 응답과, 생성되는 대로 output을 보여 주면 빈 화면 대기를 없앨 수 있는 user-facing interface에 잘 맞습니다."),
+      item("Adds cost or complexity\nYou assemble blocks yourself, you must not act on partial blocks, and you must handle mid-stream interruption explicitly.", "Adds cost or complexity\nblock을 직접 조립해야 하고, partial block에 대해 행동하면 안 되며, mid-stream interruption을 명시적으로 처리해야 합니다."),
+      item("Use a different approach\nFor short responses or backend jobs where no one is waiting on the output, a non-streamed call is simpler and removes the partial-state risk entirely.", "Use a different approach\n짧은 응답이나 output을 기다리는 사람이 없는 backend job에서는 non-streamed call이 더 단순하며 partial-state risk를 완전히 제거합니다.")
+    ]
+  },
+  {
+    id: "2-5-context-engineering",
+    title: "2-5. Context Engineering",
+    items: [
+      item("2-5. Context Engineering", "2-5. Context Engineering"),
+      item("Model selection and keeping multi-turn sessions in budget", "모델 선택과 multi-turn session을 budget 안에 유지하기"),
+      item("You make one early choice: which model runs the workload.", "초기에 한 가지 선택을 합니다. 어떤 model이 workload를 실행할지입니다."),
+      item("The Claude family covers a range of cost, latency, and capability tradeoffs, so the model you pick sets the price and speed floor that every later decision moves within.", "Claude family는 cost, latency, capability tradeoff의 범위를 포괄하므로, 선택한 model은 이후 모든 결정이 그 안에서 움직이는 가격과 속도의 하한선을 정합니다."),
+      item("Once the model is set, the next constraint is the context window: the full span of text the model can take in at once, including your prompt, the conversation so far, and every tool result.", "model이 정해지면 다음 제약은 context window입니다. 이는 prompt, 지금까지의 conversation, 모든 tool result를 포함해 model이 한 번에 받아들일 수 있는 전체 text 범위입니다."),
+      item("Every tool result Claude returns gets appended to the context window and stays there for the rest of the session.", "Claude가 반환하는 모든 tool result는 context window에 추가되고 session이 끝날 때까지 거기에 남습니다."),
+      item("In a single-turn prompt, that's invisible.", "single-turn prompt에서는 이것이 눈에 띄지 않습니다."),
+      item("In a multi-step agent session running ten or twenty tool calls, the window fills up fast, and once it fills, the agent either compacts (losing detail) or stalls before the task is done.", "열 개나 스무 개의 tool call을 실행하는 multi-step agent session에서는 window가 빠르게 차고, 가득 차면 agent는 compact되어 detail을 잃거나 task가 끝나기 전에 멈춥니다."),
+      item("So, the question for any agent workflow is whether you've decided in advance what goes into the context window, what comes back out as a summary, and what never enters at all.", "따라서 모든 agent workflow에서 물어야 할 질문은 context window에 무엇이 들어가고, 무엇이 summary로 돌아오며, 무엇은 애초에 들어가지 않는지를 미리 결정했는지입니다."),
+      item("That set of choices is context engineering.", "그 선택들의 집합이 context engineering입니다.")
+    ]
+  },
+  {
+    id: "2-5-1-model-selection-start-with-sonnet-move-deliberately",
+    title: "2-5-1. Model selection: Start with Sonnet, move deliberately",
+    items: [
+      item("2-5-1. Model selection: Start with Sonnet, move deliberately", "2-5-1. 모델 선택: Sonnet에서 시작하고 의도적으로 이동하기"),
+      item("The Claude model family currently spans four tiers: Fable, Opus, Sonnet, and Haiku, each optimized for different cost, latency, and capability tradeoffs.", "Claude model family는 현재 Fable, Opus, Sonnet, Haiku 네 tier로 구성되며, 각각 다른 cost, latency, capability tradeoff에 최적화되어 있습니다."),
+      item("Sonnet is the balanced default for most production workloads.", "Sonnet은 대부분의 production workload에 대한 균형 잡힌 default입니다."),
+      item("Haiku is built for speed and cost efficiency on tasks that fit its capability envelope.", "Haiku는 capability envelope에 맞는 task에서 speed와 cost efficiency를 위해 만들어졌습니다."),
+      item("Opus handles demanding work above the Sonnet envelope, and Fable is Anthropic's most capable model, built for the most demanding tasks including complex reasoning, advanced coding, research synthesis, and sophisticated agentic workflows where maximum intelligence is the priority.", "Opus는 Sonnet envelope를 넘는 demanding work를 처리하고, Fable은 Anthropic의 가장 capable한 model로 complex reasoning, advanced coding, research synthesis, maximum intelligence가 우선인 sophisticated agentic workflow 같은 가장 demanding한 task를 위해 만들어졌습니다."),
+      item("Confirm the current lineup and model identifiers against platform.claude.com/docs at build time.", "build time에 platform.claude.com/docs에서 current lineup과 model identifier를 확인하세요."),
+      item("The default starting point is Sonnet.", "기본 시작점은 Sonnet입니다."),
+      item("Move up to Opus only when an eval set tells you Sonnet isn't meeting your quality bar.", "eval set이 Sonnet이 quality bar를 충족하지 못한다고 알려 줄 때만 Opus로 올리세요."),
+      item("Move down to Haiku only when an eval set tells you the quality regression is acceptable at your task, not just to save costs.", "비용 절감만을 위해서가 아니라, eval set이 해당 task에서 quality regression이 허용 가능하다고 알려 줄 때만 Haiku로 내리세요."),
+      item("Your decision to move models should always be a measured decision.", "model을 바꾸는 결정은 항상 측정에 기반한 결정이어야 합니다.")
+    ]
+  },
+  {
+    id: "2-5-2-the-context-window-is-not-a-free-resource",
+    title: "2-5-2. The context window is not a free resource",
+    items: [
+      item("2-5-2. The context window is not a free resource", "2-5-2. context window는 공짜 자원이 아닙니다."),
+      item("Think of the context window as the amount of space Claude can hold in working memory.", "context window를 Claude가 working memory에 담을 수 있는 공간의 양이라고 생각하세요."),
+      item("Every message you send, every tool result you return, every document you inject, and every response Claude generates occupies space in that window.", "보내는 모든 message, 반환하는 모든 tool result, 주입하는 모든 document, Claude가 생성하는 모든 response는 그 window의 공간을 차지합니다."),
+      item("If a request is already larger than the context window, the Messages API rejects it with a validation error before generation; if a request fits but generation reaches the ceiling partway, current models return the output generated so far with a model_context_window_exceeded stop reason.", "request가 이미 context window보다 크면 Messages API는 generation 전에 validation error로 거부합니다. request는 들어가지만 generation 중 ceiling에 도달하면 현재 model은 model_context_window_exceeded stop reason과 함께 지금까지 생성한 output을 반환합니다."),
+      item("Neither path silently truncates your oldest content.", "어느 경로도 가장 오래된 content를 조용히 잘라내지 않습니다."),
+      item("If you want a session to keep running past the window limit, your application must manage that itself by trimming or summarizing history before the next request goes out.", "session이 window limit을 넘어 계속 실행되게 하려면 다음 request가 나가기 전에 application이 history를 trim하거나 summarize해서 직접 관리해야 합니다."),
+      item("In development, the window rarely fills because test inputs are small and sessions are short.", "development에서는 test input이 작고 session이 짧기 때문에 window가 거의 차지 않습니다."),
+      item("In production, tool outputs are often three to five times longer than test fixtures, sessions run for more turns, and the window fills at turn eight rather than turn fifty, which means they fill earlier than development.", "production에서는 tool output이 test fixture보다 세 배에서 다섯 배 더 긴 경우가 많고 session도 더 많은 turn을 실행하므로, window가 50번째 turn이 아니라 8번째 turn에 차는 식으로 development보다 훨씬 빨리 찹니다."),
+      item("The cost of not planning for this is a production outage.", "이를 계획하지 않은 대가는 production outage입니다.")
+    ]
+  },
+  {
+    id: "2-5-3-four-strategies-for-staying-in-budget",
+    title: "2-5-3. Four strategies for staying in budget",
+    items: [
+      item("2-5-3. Four strategies for staying in budget", "2-5-3. budget 안에 머무르기 위한 네 가지 전략"),
+      item("The previous section made the case for moving state out of the live context window.", "앞 섹션은 state를 live context window 밖으로 옮겨야 하는 이유를 설명했습니다."),
+      item("The reason behind that is the budget.", "그 이유는 budget입니다."),
+      item("Every token in the window costs money on input and adds latency to the response, and a long session compounds both.", "window 안의 모든 token은 input 비용을 발생시키고 response latency를 더하며, 긴 session은 둘 다 누적시킵니다."),
+      item("The four strategies below are concrete ways to manage that budget, each suited to a different shape of conversation.", "아래 네 가지 전략은 그 budget을 관리하는 구체적인 방법이며, 각각 다른 conversation 형태에 맞습니다."),
+      item("Strategy: Pruning\nWhat it does: Lets you jump back to an earlier message and continue from there, removing the conversation that came after.\nWhen to apply: After Claude has gone down an unproductive path or accumulated debugging back-and-forth that won't help the next task.\nWhat continuity you lose: The work done after the rewind point is gone. If Claude learned something useful in that stretch, it has to relearn it.", "Strategy: Pruning\nWhat it does: 이전 message로 돌아가 그 지점부터 계속하게 하며, 그 뒤에 있던 conversation을 제거합니다.\nWhen to apply: Claude가 생산적이지 않은 경로로 갔거나 다음 task에 도움이 되지 않는 debugging 왕복을 쌓았을 때 적용합니다.\nWhat continuity you lose: rewind point 이후의 작업은 사라집니다. 그 구간에서 Claude가 유용한 것을 배웠다면 다시 배워야 합니다."),
+      item("Strategy: Compaction (/compact in Claude Code; server-side compaction in the API, a beta strategy the platform performs for you, with manual summarization as the client-side alternative)\nWhat it does: Summarizes the conversation history into a condensed version that preserves the key information Claude has learned. The summary costs fewer tokens than the original turns.\nWhen to apply: When the session is approaching the context ceiling but you want to keep working on the same feature with the knowledge Claude has built up.\nWhat continuity you lose: Details can be lost in the summarization. Anything not captured in the summary will not be available to Claude going forward.", "Strategy: Compaction (/compact in Claude Code; API의 server-side compaction은 platform이 대신 수행하는 beta strategy이며, manual summarization은 client-side alternative입니다.)\nWhat it does: Claude가 배운 핵심 정보를 보존하는 condensed version으로 conversation history를 요약합니다. summary는 original turn보다 token을 적게 씁니다.\nWhen to apply: session이 context ceiling에 가까워졌지만 Claude가 쌓아 온 지식으로 같은 feature 작업을 계속하고 싶을 때 적용합니다.\nWhat continuity you lose: summarization 과정에서 detail이 사라질 수 있습니다. summary에 담기지 않은 것은 이후 Claude가 사용할 수 없습니다."),
+      item("Strategy: Clearing (/clear in Claude Code; new session in API)\nWhat it does: Starts a new conversation with empty context. Nothing from the previous session carries forward.\nWhen to apply: When the next task is completely different from the current one, and previous context would only introduce bias or confusion.\nWhat continuity you lose: All session context is gone. Anything Claude needs to remember across sessions has to be put somewhere persistent, like a CLAUDE.md file.", "Strategy: Clearing (/clear in Claude Code; API에서는 new session)\nWhat it does: empty context로 새 conversation을 시작합니다. 이전 session의 것은 아무것도 이어지지 않습니다.\nWhen to apply: 다음 task가 현재 task와 완전히 다르고 이전 context가 bias나 confusion만 만들 때 적용합니다.\nWhat continuity you lose: 모든 session context가 사라집니다. Claude가 session을 넘어 기억해야 할 것은 CLAUDE.md file 같은 persistent한 곳에 넣어야 합니다."),
+      item("Strategy: Subagent Handoffs\nWhat it does: Spawns a subagent in its own isolated context window with only the task description and system prompt it needs. The subagent does the work and returns a summary.\nWhen to apply: When a subtask is self-contained enough to delegate, especially exploration work where the journey clutters the main context but the answer is short.\nWhat continuity you lose: Visibility into how the subagent reached its conclusion. The intermediate steps are discarded with the subagent's context.", "Strategy: Subagent Handoffs\nWhat it does: 필요한 task description과 system prompt만 가진 isolated context window에 subagent를 띄웁니다. subagent는 작업을 수행하고 summary를 반환합니다.\nWhen to apply: subtask가 delegation하기에 충분히 self-contained일 때, 특히 과정은 main context를 어지럽히지만 답은 짧은 exploration work에 적용합니다.\nWhat continuity you lose: subagent가 결론에 어떻게 도달했는지에 대한 visibility를 잃습니다. intermediate step은 subagent context와 함께 버려집니다.")
+    ]
+  },
+  {
+    id: "2-5-4-two-more-levers-prompt-caching-and-token-counting",
+    title: "2-5-4. Two more levers: prompt caching and token counting",
+    items: [
+      item("2-5-4. Two more levers: prompt caching and token counting", "2-5-4. 두 가지 추가 lever: prompt caching과 token counting"),
+      item("The four strategies above manage what enters the context window.", "위의 네 가지 전략은 context window에 무엇이 들어가는지를 관리합니다."),
+      item("Two API features reduce what you pay for what's already there.", "두 가지 API feature는 이미 그 안에 있는 것에 대해 지불하는 비용을 줄입니다."),
+      item("Prompt caching stores the processing work done on a stable prefix of your request so follow-up requests can reuse it instead of reprocessing the same tokens.", "Prompt caching은 request의 stable prefix에 대해 수행한 processing work를 저장해서 follow-up request가 같은 token을 다시 처리하는 대신 재사용할 수 있게 합니다."),
+      item("The first request writes the prefix to cache; subsequent requests that send identical content up to that point pay a fraction of the original cost.", "첫 request는 prefix를 cache에 쓰고, 이후 같은 지점까지 동일한 content를 보내는 request는 original cost의 일부만 지불합니다."),
+      item("The strongest candidates are parts of the request that rarely change across turns: a long system prompt, a large tool definition set, or a reference document you query repeatedly.", "가장 좋은 후보는 긴 system prompt, 큰 tool definition set, 반복해서 query하는 reference document처럼 turn 사이에서 거의 변하지 않는 request 부분입니다."),
+      item("You enable caching by marking a cache breakpoint with a cache_control field of type ephemeral on the last block you want cached.", "cache하려는 마지막 block에 type ephemeral의 cache_control field로 cache breakpoint를 표시해 caching을 활성화합니다."),
+      item("You can place up to four breakpoints.", "breakpoint는 최대 네 개까지 둘 수 있습니다."),
+      item("For multi-turn sessions with a stable system prompt and tool schemas, caching those prefixes once and reusing them across turns is the highest-leverage cost reduction available.", "stable system prompt와 tool schema가 있는 multi-turn session에서는 그 prefix들을 한 번 cache하고 turn 사이에서 재사용하는 것이 가장 leverage가 큰 cost reduction입니다."),
+      item("Token counting lets you measure context pressure before a request goes out rather than after it fails.", "Token counting은 request가 실패한 뒤가 아니라 나가기 전에 context pressure를 측정하게 해 줍니다."),
+      item("The count_tokens endpoint takes the same request body as a messages call and returns the token count without running inference.", "count_tokens endpoint는 messages call과 같은 request body를 받아 inference를 실행하지 않고 token count를 반환합니다."),
+      item("Use it during development to verify your context budget assumptions hold against real tool outputs, not just test fixtures, and in production to gate requests that would exceed the window before they error.", "development에서는 test fixture가 아니라 real tool output에 대해 context budget 가정이 맞는지 검증하는 데 사용하고, production에서는 window를 초과할 request를 error 전에 gate하는 데 사용하세요.")
+    ]
+  },
+  {
+    id: "2-5-5-the-three-places-a-rag-path-can-break",
+    title: "2-5-5. The three places a RAG path can break",
+    items: [
+      item("2-5-5. The three places a RAG path can break", "2-5-5. RAG 경로가 깨질 수 있는 세 지점"),
+      item("The path has three places where it can go wrong: the chunking, the embedding match, and the assembly into the prompt.", "이 경로에는 잘못될 수 있는 세 지점이 있습니다. chunking, embedding match, prompt로의 assembly입니다."),
+      item("Chunking decides what a unit of retrievable context is.", "Chunking은 retrievable context의 단위가 무엇인지 결정합니다."),
+      item("Split too small and a single chunk lacks the surrounding context to be useful.", "너무 작게 나누면 단일 chunk가 유용해지기 위한 surrounding context를 잃습니다."),
+      item("Split too large and one chunk dilutes the match with unrelated text.", "너무 크게 나누면 하나의 chunk가 관련 없는 text로 match를 희석시킵니다."),
+      item("Sentence-based or section-based chunking with a little overlap is a reasonable default.", "약간의 overlap을 둔 sentence-based 또는 section-based chunking이 합리적인 default입니다."),
+      item("The overlap matters because facts that cross a boundary would otherwise be split apart and become difficult to retrieve.", "boundary를 가로지르는 fact는 그렇지 않으면 쪼개져 retrieve하기 어려워지기 때문에 overlap이 중요합니다."),
+      item("The embedding match decides which chunks are returned.", "embedding match는 어떤 chunk가 반환되는지를 결정합니다."),
+      item("It uses a similarity search, so it retrieves content that is semantically close.", "similarity search를 사용하므로 의미적으로 가까운 content를 retrieve합니다."),
+      item("This is not always what contains the exact term you need.", "이것이 항상 필요한 정확한 term을 포함하는 것은 아닙니다."),
+      item("A query for a specific identifier can miss the relevant chunk if a more semantically similar result outranks it.", "특정 identifier에 대한 query는 의미적으로 더 비슷한 결과가 더 높은 순위를 차지하면 관련 chunk를 놓칠 수 있습니다."),
+      item("This is why a lexical match is sometimes run alongside the semantic one.", "이 때문에 lexical match가 semantic match와 함께 실행되기도 합니다."),
+      item("The assembly step is where retrieved chunks must reach the model in the structure the prompt expects, otherwise the model answers from memory instead of from the retrieved text.", "assembly step에서는 retrieved chunk가 prompt가 기대하는 구조로 model에 도달해야 합니다. 그렇지 않으면 model은 retrieved text가 아니라 memory에서 답합니다."),
+      item("The fetch-once path gives you a system you can reason about: you can inspect which chunks were retrieved for a query and test that retrieval directly.", "fetch-once path는 reasoning할 수 있는 system을 제공합니다. query에 대해 어떤 chunk가 retrieve되었는지 inspect하고 retrieval을 직접 test할 수 있습니다."),
+      item("The cost is the infrastructure: the index that must be built, stored, kept in sync as the corpus changes, and secured wherever it lives.", "비용은 infrastructure입니다. corpus가 변할 때 build, store, sync, secure해야 하는 index가 필요합니다."),
+      item("The search-across-rounds path removes that infrastructure and the staleness that comes with it, since the model reads the current files at query time, at the cost of spending more tokens and time per query and giving you a less inspectable process.", "search-across-rounds path는 model이 query time에 current file을 읽기 때문에 그 infrastructure와 staleness를 제거하지만, query마다 더 많은 token과 time을 쓰고 process가 덜 inspectable해지는 비용이 있습니다."),
+      item("For a stable reference corpus queried with simple lookups, the index is worth owning.", "simple lookup으로 query되는 stable reference corpus라면 index를 소유할 가치가 있습니다."),
+      item("For a changing corpus or multi-step questions, the iterative search is usually the simpler system despite costing more per query.", "changing corpus나 multi-step question에서는 query당 비용이 더 들더라도 iterative search가 보통 더 단순한 system입니다."),
+      item("The reported performance gain for single-agent agentic search over a retrieval index is a version-pinned figure.", "retrieval index 대비 single-agent agentic search의 보고된 performance gain은 version-pinned figure입니다."),
+      item("Confirm it against the reference layer at build time rather than relying on the number in this module.", "이 module의 숫자에 의존하기보다 build time에 reference layer에서 확인하세요."),
+      item("Now, let's understand a bit about two of the most common strategies: compaction and subagent handoffs.", "이제 가장 흔한 두 전략인 compaction과 subagent handoff에 대해 조금 이해해 봅시다.")
+    ]
+  },
+  {
+    id: "2-5-6-applying-compaction-what-gets-preserved-depends-on-how-you-write-the-summarizer",
+    title: "2-5-6. Applying compaction: What gets preserved depends on how you write the summarizer",
+    items: [
+      item("2-5-6. Applying compaction: What gets preserved depends on how you write the summarizer", "2-5-6. compaction 적용: 무엇이 보존되는지는 summarizer를 어떻게 쓰는지에 달려 있습니다."),
+      item("When you use /compact in Claude Code, the tool decides what to include in the summary.", "Claude Code에서 /compact를 사용하면 tool이 summary에 무엇을 포함할지 결정합니다."),
+      item("In the API, the documented primary strategy is server-side compaction (beta): the platform summarizes the conversation for you when it is configured on the request.", "API에서 문서화된 primary strategy는 server-side compaction(beta)입니다. request에 설정되면 platform이 conversation을 대신 summarize합니다."),
+      item("When you instead implement manual compaction in an API session, you write the summarizer prompt yourself.", "대신 API session에서 manual compaction을 구현한다면 summarizer prompt를 직접 작성합니다."),
+      item("That prompt determines what the agent will know in subsequent turns.", "그 prompt는 이후 turn에서 agent가 무엇을 알게 될지를 결정합니다."),
+      item("Summarizer prompt says \"summarize the conversation so far\"\nProduces a general summary that may drop task-critical state, which files were modified, what decision was made at a branch point, and what error was encountered and resolved.", "Summarizer prompt가 \"summarize the conversation so far\"라고 말하면\n수정된 file, branch point에서 내려진 결정, 발생하고 해결된 error 같은 task-critical state를 빠뜨릴 수 있는 general summary를 만듭니다."),
+      item("Summarizer prompt says \"summarize the conversation, preserving all file paths modified, all decisions made, and any errors encountered and their resolutions\"\nProduces a summary the agent can use.", "Summarizer prompt가 \"summarize the conversation, preserving all file paths modified, all decisions made, and any errors encountered and their resolutions\"라고 말하면\nagent가 사용할 수 있는 summary를 만듭니다."),
+      item("This is not an edge case; task-critical state loss from an under-specified summarizer is one of the most common sources of multi-session agent failures.", "이것은 edge case가 아닙니다. under-specified summarizer로 인한 task-critical state loss는 multi-session agent failure의 가장 흔한 원인 중 하나입니다.")
+    ]
+  },
+  {
+    id: "2-5-7-subagent-handoffs-managing-long-horizon-tasks",
+    title: "2-5-7. Subagent handoffs: Managing long-horizon tasks",
+    items: [
+      item("2-5-7. Subagent handoffs: Managing long-horizon tasks", "2-5-7. Subagent handoff: long-horizon task 관리"),
+      item("When a task is too large for a single context window, increasing the window is not a solution.", "task가 단일 context window에 비해 너무 크다면 window를 늘리는 것은 해결책이 아닙니다."),
+      item("The solution is to decompose the task and pass only the relevant context to each subagent.", "해결책은 task를 분해하고 각 subagent에 관련 context만 전달하는 것입니다."),
+      item("A subagent receives a scoped task and the minimum context it needs, the results of prior steps that are directly relevant, the tools it needs to complete its task, and clear exit conditions.", "subagent는 scoped task, 필요한 최소 context, 직접 관련된 이전 step의 result, task 완료에 필요한 tool, 명확한 exit condition을 받습니다."),
+      item("The parent agent collects the results.", "parent agent는 result를 수집합니다."),
+      item("This pattern keeps per-turn cost low and makes long-horizon tasks tractable.", "이 pattern은 per-turn cost를 낮게 유지하고 long-horizon task를 다루기 쉽게 만듭니다."),
+      item("Like compaction and pruning, subagent handoffs add implementation overhead, so apply them only where context cost is a real constraint: a simple single-turn prompt or short workflow doesn't need this.", "compaction과 pruning처럼 subagent handoff는 implementation overhead를 추가하므로, context cost가 실제 제약인 경우에만 적용하세요. 간단한 single-turn prompt나 짧은 workflow에는 이것이 필요하지 않습니다."),
+      item("Handles well\nMulti-step agent sessions that exceed the token budget and need decomposition. Best designed at the architecture stage rather than patched in as a production fix.", "Handles well\ntoken budget을 초과하고 decomposition이 필요한 multi-step agent session에 잘 맞습니다. production fix로 덧붙이기보다 architecture stage에서 설계하는 것이 가장 좋습니다."),
+      item("Use a different approach\nPipelines that never approach the window limit. Measure actual token usage against your model's context limit before adding management overhead.", "Use a different approach\nwindow limit에 가까워지지 않는 pipeline에는 다른 접근을 쓰세요. management overhead를 추가하기 전에 실제 token usage를 model의 context limit과 비교해 측정하세요."),
+      item("Forward pointer\nThe strategies covered so far assume you know your context budget is under pressure and you are choosing a tool to manage it. The critical point here is not to know the pressure exists until the session breaks. A workload can pass every test in development and then fail in production for one reason: the tool output got bigger, the sessions got longer, and the context window that held twenty turns cleanly now fills at turn eight. The next section walks through exactly how that happens, using a worked postmortem of an agent that ran fine on test fixtures and then hit its ceiling once real documents started flowing through it.", "Forward pointer\n지금까지 다룬 전략들은 context budget이 압박받고 있다는 것을 알고 그것을 관리할 도구를 선택한다고 가정합니다. 여기서 중요한 점은 session이 깨지기 전까지 그 압박이 존재한다는 것을 모를 수 있다는 것입니다. workload는 development의 모든 test를 통과하고도 production에서 실패할 수 있습니다. 이유는 tool output이 커지고, session이 길어지고, 20 turn을 깔끔하게 담던 context window가 8번째 turn에서 차기 때문입니다. 다음 섹션은 test fixture에서는 잘 돌다가 실제 document가 흘러들어오자 ceiling에 도달한 agent의 worked postmortem으로 그 일이 정확히 어떻게 발생하는지 살펴봅니다.")
     ]
   }
 ];
