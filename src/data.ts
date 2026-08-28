@@ -412,6 +412,383 @@ Pipelines that never approach the window limit. Measure actual token usage again
 
 Forward pointer
 The strategies covered so far assume you know your context budget is under pressure and you are choosing a tool to manage it. The critical point here is not to know the pressure exists until the session breaks. A workload can pass every test in development and then fail in production for one reason: the tool output got bigger, the sessions got longer, and the context window that held twenty turns cleanly now fills at turn eight. The next section walks through exactly how that happens, using a worked postmortem of an agent that ran fine on test fixtures and then hit its ceiling once real documents started flowing through it.
+
+2-6. Agent Construction
+
+Building a production agent: the loop, wiring paths, orchestration, and human-in-the-loop
+
+An agent is a multi-step tool-use loop with managed context and a defined goal. You have already built the individual pieces, including tool schemas and context management. This section connects them into a working system and adds the layer that neither topics cover on their own.
+
+When components run together across multiple turns, new failure modes appear that isolated testing does not catch. Routing decisions that worked in single-turn tests start to compound. Context fills faster than expected. A step that depends on a previous result gets the wrong input because an earlier tool call was structured incorrectly. The question that should precede every agent build is: does this problem require an agent?
+
+Agents carry coordination overhead, expanded context costs, and more surface area for failure than simpler patterns. Answering that question deliberately is the first design decision.
+
+2-6-1. Workflow or agent: Make this decision before you write the first line
+
+The most critical mistake in agent development is choosing the wrong pattern at the start. Workflows and agents solve different problems: using an agent when a workflow is sufficient adds behavioral complexity without adding capability. Using a workflow when an agent is needed produces a system that breaks whenever user input deviates from the predetermined path.
+
+Choose a workflow when you can enumerate the exact steps in code. Choose an agent when you can specify the goal and the tools but not the exact path.
+
+Choose a workflow when error cost is real and step-level guardrails matter. Choose an agent when the path through work cannot be enumerated in advance.
+
+Choose a workflow when observability with standard tooling is required. Choose an agent when non-determinism is acceptable and the agent's possible actions are constrained by its registered toolset.
+
+Choose a workflow when the inputs are well-constrained to a known set. Choose an agent when user inputs vary unpredictably in content and structure.
+
+Choose a workflow when every execution of the task follows the same sequence. Choose an agent when the task requires creative sequencing of available tools.
+
+2-6-2. The agent is the pattern. The wiring path is an implementation choice.
+
+Once you have decided the task needs an agent, you have also decided on a pattern: a loop that calls tools, manages context, and runs until a goal is met. For single-agent systems, that pattern is constant across all three wiring paths. Multi-agent architectures, where a planner, executor, and evaluator run as separate agents handing off through structured artifacts, introduce additional design decisions beyond the loop itself. Those patterns are covered later in this track. That pattern does not change based on how you build it, what changes is how much of the loop you write yourself versus how much you hand to a library or a hosted service.
+
+There are three wiring paths, and they sit on a spectrum of how much infrastructure you own. You can write the loop directly against the Messages API, which gives you full control and full responsibility. You can use the Agent SDK, which runs the same loop inside your own process and hands you tool execution, context management, and the iteration structure already built. Or you can use Claude Managed Agents (currently in public beta), where Anthropic runs the loop and the sandbox and your application streams events in and results back. The sections that follow teach the loop itself, because the loop is what stays constant. The path you choose decides who maintains the parts around it.
+
+2-6-3. Wiring paths: who runs the loop, and what you take on
+
+The three paths differ in one variable: how much of the agent's runtime you own. The table is ordered from top to bottom by how much infrastructure you hand off. Choose based on your deployment and compliance constraints, don't be tempted to choose the path that is just fastest to prototype.
+
+1. Raw Messages API loop
+
+Who runs the loop: Your code runs every iteration. You send the request, read the tool-use blocks, execute the tools, and append the results yourself.
+
+What you own: The full loop, tool execution, context management, retries, and exit conditions. Nothing is provided for you.
+
+Choose this when: You need full control over each step, you have constraints a library does not accommodate, or you are teaching yourself how the loop works before adding abstraction.
+
+What to check before committing: The maintenance cost is yours. Every behavior the SDK would give you for free, including context management and parallel tool handling, becomes code you write and test.
+
+2. Agent SDK
+
+Who runs the loop: The SDK runs the loop inside your own process. It iterates and manages context, and your code still executes the tools the agent calls.
+
+What you own: Tool execution and the surrounding application. The SDK provides the loop structure, context management, and tool registration.
+
+Choose this when: You want the loop, context handling, and tool scaffolding that power Claude Code without rebuilding them, and you want the agent running in your own environment in Python or TypeScript.
+
+What to check before committing: Whether filesystem-based features like CLAUDE.md and skills load in the Agent SDK is controlled by the settingSources configuration. Do not rely on a default: always set settingSources explicitly to the sources you intend, for example, ["user", "project", "local"] to match Claude Code CLI behavior, or [] to run fully isolated with only what you pass programmatically. Confirm current default behavior against the Agent SDK reference at build time.
+
+3. Claude Managed Agents
+
+Who runs the loop: Anthropic runs the loop and the sandbox. Your application sends user events and streams results back over server-sent events.
+
+What you own: The application layer and the agent definition. You define the model, system prompt, tools, MCP servers, and skills once, then reference the agent by ID across sessions.
+
+Choose this when: You need long-running execution measured in minutes or hours, you want a managed sandbox, or you want to avoid building the loop, the sandbox, and the tool-execution layer at all. Also available on Claude Platform on AWS with some feature differences, verify capability parity against your deployment surface before committing.
+
+What to check before committing: Sessions are stateful and stored server-side, which means they are not currently eligible for Zero Data Retention or a HIPAA Business Associate Agreement. See Anthropic API data retention documentation at platform.claude.com and verify it at publish.
+
+Currently in public beta, all endpoints require the managed-agents-2026-04-01 beta header and behaviors may be refined between releases. Build with a migration plan in place.
+
+2-6-4. Claude Managed Agents: when to use
+
+The table above lists Managed Agents as the third path. Let's make that choice concrete because for some workloads it's the right default.
+
+Here's the core difference: with a raw loop or the Agent SDK, your code runs the iteration. You send each request, read the tool-use blocks, run the tools, and append the results. With Managed Agents, Anthropic runs the loop and the sandbox for you. Your application defines the agent once (model, system prompt, tools, MCP servers, skills), refers to it by ID, sends user events, and streams the results back over server-sent events.
+
+What you stop owning, and what you take on instead
+
+Category: Execution & infrastructure
+What you stop owning: The iteration loop, the execution sandbox, the retries inside the loop, and the tool-execution runtime. Anthropic runs all of it server-side.
+What you take on instead: An agent definition managed as a versioned API resource, plus an application layer that sends events and consumes the streamed results.
+
+Category: Session duration & state
+What you stop owning: Long-running execution management. Sessions can run for minutes or hours without your process holding the loop open.
+What you take on instead: Server-side session state. Sessions are stateful and stored by Anthropic, and are subject to its data handling policies and constraints (see the constraint note below).
+
+Category: Sandbox lifecycle
+What you stop owning: Sandbox provisioning and teardown for tool execution.
+What you take on instead: A dependency on the managed sandbox's available tools and its execution model, rather than your own environment.
+
+Choose Managed Agents when
+
+The task runs long: Execution measured in minutes or hours is awkward to hold open in your own process, and the managed loop is built for exactly that.
+
+You want a managed sandbox: If you'd otherwise be building and securing an execution environment for tool calls, using Managed Agents takes a large piece of infrastructure off your plate.
+
+You'd rather not build the loop, the sandbox, and the tool-execution layer at all: You are willing to define the agent as an API resource instead.
+
+The constraint that decides it for regulated work
+
+Managed Agent sessions are stateful and stored server-side. That storage is the reason these sessions aren't currently eligible for Zero Data Retention or a HIPAA Business Associate Agreement. So, if your workload carries PHI or falls under a ZDR requirement, this path is ruled out no matter how well it fits operationally, and you route to the Agent SDK or a raw loop on a covered configuration instead. The governing constraint picks the path before convenience gets a say.
+
+A common progression is to prototype on the Agent SDK locally, then move to Managed Agents for production. The core agent definition carries over conceptually. What changes is the format: the Agent SDK uses code-level and filesystem configuration, while Managed Agents defines the agent as a versioned API resource. Expect a re-expression step, not a direct export.
+
+Handles well: Long-running agents, and workloads where you'd rather not build or secure a sandbox and loop yourself.
+
+Adds cost or complexity: Server-side stateful sessions, an agent-as-resource definition format, and a beta surface that can change between releases.
+
+Use a different approach: For PHI or ZDR workloads, or when you need full in-process control, stay on the Agent SDK or a raw loop on a covered configuration.
+
+2-6-5. Wiring the loop: the four steps that hold across every path
+
+The four steps below define a working agent loop no matter which path you build on. When you write the loop against the Messages API, you implement all four yourself. When you use the Agent SDK, it provides the structure for registering tools, setting the system prompt, and iterating the loop, and your code still handles tool execution. The steps are the same; what differs is how much you write versus inherit.
+
+Register tools: Each tool follows the same schema structure. The SDK registers them against the agent, so Claude knows what is available.
+
+Set the system prompt: Scope it to the agent's task. A broad system prompt produces broader, less reliable tool routing. A system prompt that names the specific task and the tools available for it produces more consistent behavior.
+
+Handle the tool-use loop: Whether you iterate the loop yourself or the SDK iterates it for you, your code handles execution. Every tool call Claude issues must be executed by your code and returned in a tool-result block.
+
+Define exit conditions: The agent loop runs until it receives a stop condition. Without explicit exit conditions, the agent will continue requesting tool calls beyond what the task requires. You should define when done means done.
+
+2-6-6. Loop wiring checklist: verify these regardless of path
+
+#: 1
+Item: Tools registered
+What to verify: Every tool the agent may need is in the registration list. No unregistered tools are referenced in the system prompt.
+
+#: 2
+Item: System prompt scoped
+What to verify: The system prompt names the task and the available tools. It does not describe tools the agent does not have. It does not omit tools the agent does have that require scoping guidance.
+
+#: 3
+Item: Tool-use loop implemented
+What to verify: Your code handles every tool-use block Claude issues and returns a tool-result block for each one before the next assistant turn. All tool-use blocks from a single assistant turn must be resolved together.
+
+#: 4
+Item: HITL insertion point defined
+What to verify: At least one point in the loop has a human-in-the-loop check. See the section below for where to insert it.
+
+#: 5
+Item: Exit conditions defined
+What to verify: The loop has a clear stopping criterion that does not depend on Claude volunteering to stop.
+
+2-6-7. Human-in-the-loop (HITL): Insertion points and when each applies
+
+A human-in-the-loop checkpoint pauses agent execution and routes to a human review step before proceeding. The question that determines where to insert one is: what is the worst possible outcome if this step runs without a human check?
+
+Insertion point: Before a destructive tool call
+What triggers the check: The agent is about to execute a write, delete, or send operation.
+Risk level it addresses: High — irreversible actions where a wrong call cannot be undone.
+
+Insertion point: After a planning step
+What triggers the check: The agent has generated a plan and is about to begin executing it.
+Risk level it addresses: Medium — incorrect plans that would produce the wrong outcome even if all steps execute correctly.
+
+Insertion point: On unexpected output
+What triggers the check: The tool result contains an error flag, an empty result, or a value outside expected bounds.
+Risk level it addresses: Variable — catches failure modes that retry logic alone will not resolve.
+
+2-6-8. Tool orchestration: Over-tooling and under-tooling
+
+The agent's routing behavior is shaped by two things, including how tools are described and how many tools are registered. Too many tools with overlapping descriptions produce erratic routing. Too few tools force the agent to either hallucinate a path or return an incomplete result.
+
+Over-tooling is the more common problem in production agents. Teams register every tool they might need "just in case" and discover that Claude's selection quality degrades as the tool surface grows. Start with the minimum set required for the task and add tools only when a specific gap in capability is confirmed.
+
+When agents are the right call: Goal-directed tasks where the exact path cannot be enumerated in advance. Handling variable inputs that would require dozens of conditional branches in a workflow.
+
+What you take on when you use an Agent: Agents add behavioral complexity: the path through the task emerges from the model's reasoning over accumulated context rather than from explicit branching logic in your code. Observability requires transcript-level tooling rather than standard operational logging.
+
+When to choose a workflow instead: When you can enumerate the steps in code, use a workflow. Agents are the last step in progression. Start with the simplest pattern that solves the problem, a single API call, then a workflow, then an agent. And move up only when the simpler pattern cannot handle the variability the task requires.
+
+2-6-9. Regulated data constraints set your delivery route and credentials before you write the wiring
+
+If your data needs to be handled with specific constraints (e.g., attorney-client privilege, HIPAA, GDPR, FedRAMP, or an internal data-residency policy), that constraint decides which endpoint your code calls, which credentials it carries, and where its logs land before you make a single design choice about prompts, tools, or memory.
+
+As a developer you usually do not pick the surface, but you do write the code that targets a specific endpoint, attaches credentials, configures the region, and emits logs. Get the governing constraint named at the start, because the wrong client configuration is much more expensive to undo after the agent is wired than to set correctly the first time. The five constraints below cover the cases you are most likely to hit in production.
+
+Constraint: Attorney-client privilege
+What it tends to rule out in code: Calls from a consumer-grade Claude.ai surface that the firm cannot audit end-to-end. Code paths that send privileged document content to any endpoint the firm has not approved for privileged material, regardless of how the prompt or system message is structured.
+What usually survives a code review: Direct API or SDK calls from inside the firm's own application, authenticated via SSO, routed through a firm-approved LLM gateway with full request and response logging. Note that Anthropic's native Compliance Conversation content (prompts, responses, and tool call payloads) is not captured by Anthropic by default on direct API traffic, so the organization must implement conversation logging in the application layer and route it to an approved log destination. Tool calls and tool results stay inside the audited path. Confirm the final logging design with your Anthropic account team.
+
+Constraint: HIPAA (PHI handling)
+What it tends to rule out in code: Code that sends Protected Health Information to any endpoint or delivery route not covered by a Business Associate Agreement for the specific configuration in use. This includes any logging or retention path your code writes to that has not been scoped under the same BAA.
+What usually survives a code review: Direct API or SDK calls on a BAA-covered configuration. BAA coverage for Anthropic first-party API access is arranged with Anthropic, which provisions a dedicated HIPAA-enabled organization that enforces feature restrictions on its own end. Confirm the covered configuration with your Anthropic account team. An alternative is a cloud-mediated route via AWS Bedrock or GCP Vertex on the partner's existing HIPAA-eligible cloud account. Note: the BAA does not cover Console, Workbench, beta features, or consumer plans. Not all API features are covered under the BAA, verify the current feature eligibility list in Anthropic's Implementation Guide before configuring.
+
+Constraint: GDPR and data residency
+What it tends to rule out in code: Delivery routes where the region of model execution cannot be pinned in code, or where the request can be served from a region outside the approved geographic boundary. Defaulting to a global endpoint without specifying region is the common pattern that breaks here.
+What usually survives a code review: A cloud-mediated route such as Bedrock or Vertex, with the region pinned in the client configuration to a covered jurisdiction. The direct Anthropic API is a separate case; it does not currently provide EU data residency, so partners with EU data residency requirements should route through Bedrock or Vertex rather than calling the API directly.
+
+Constraint: FedRAMP and government
+What it tends to rule out in code: Any code path that calls an endpoint not on an authorized cloud environment at the required impact level. This includes development and test paths that hit the commercial endpoint while production hits the authorized one, because credentials and code patterns leak between them.
+What usually survives a code review: Three authorized routes exist as of publish time. Claude for Government (C4G) carries a direct FedRAMP High authorization held through Palantir Federal Cloud Service – Supporting Services (PFCS-SS). Claude via Amazon Bedrock GovCloud is approved for FedRAMP High and DoD IL4/5 workloads. Claude via Vertex AI Assured Workloads is also FedRAMP authorized. Claude Enterprise on AWS Marketplace is not FedRAMP authorized, so teams requiring FedRAMP compliance must use one of the three routes above. Verify current authorization status at trust.anthropic.com before configuring.
+
+Constraint: Internal data-residency policy
+What it tends to rule out in code: Calls from any SDK client configured against a cloud vendor outside the partner's approved list, regardless of whether the underlying technical capability would support the workload. Procurement-level constraints rule the code path out before engineering preferences enter the conversation.
+What usually survives a code review: The delivery route on the partner's approved cloud vendor. In code terms, that is whichever SDK client and endpoint configuration their CIO has already cleared. Build against that one rather than switching mid-project because another route looks easier.
+
+This table covers the constraints that directly determine endpoint selection and credential configuration. SOC 2 is not in scope here. It governs how your systems are built and operated, not which endpoint your code calls, and is covered in Module 4 alongside other security posture and audit requirements.
+
+Forward pointer
+
+Module 4 (Production Engineering, Evals & Security) goes deep on secure-by-design patterns for IAM and privacy, defenses against prompt injection from untrusted inputs, runtime guardrails, and agent hardening. The role of this section is narrower: surface the constraint at the point in the build where it actually rules options out, which is when you pick the endpoint, the SDK client configuration, and the credentials your agent carries into production.
+
+2-7. Agent Memory
+
+Choosing the right scope for state that survives sessions
+
+The agent from the previous section runs correctly within a single session. What it cannot do is remember anything when that session ends. Memory scope is how you decide what the agent should know at the start of the next session, and how much it costs to carry that knowledge forward.
+
+2-7-1. Memory patterns and when each is right
+
+Beyond memory scope, the blueprint groups several agent design patterns under this objective, and you have already built each one earlier in this module. The tool-use loop, where the model calls a tool, reads the result, and continues, is the core pattern from the tool-use and agent-construction clusters. Multi-step task decomposition breaks a goal into ordered subtasks, and planning-and-execution separates deciding the plan from carrying it out, the same split the human-in-the-loop check after a planning step guards. Memory scope, covered next, is the pattern that decides what state survives once the loop ends.
+
+Memory scope sets what an agent knows when a new session starts. Making the wrong choice has two failure modes, and they pull in opposite directions:
+
+Too much state in-context inflates every API call, because the model re-reads the full conversation on every turn and the bill scales with session length.
+Too little state in-persistent storage strips the agent of memory across sessions, because anything not written down disappears the moment the conversation ends.
+
+Scope: In-context memory
+What persists: State lives in the active conversation and survives turns within a single session.
+Cost: Zero retrieval overhead; inflates token cost as conversation grows.
+When to use: Short sessions where all the state the agent needs fits inside the context window and nothing has to carry across restarts.
+What you lose: Everything once the session ends. A clear command or a new session wipes the state.
+
+Scope: External storage
+What persists: State is written to a database and read back at session start or on demand.
+Cost: Each database call adds retrieval latency, and you take on the engineering work of read and write logic.
+When to use: State that has to survive across sessions, move between users, or be shared across multiple agent instances.
+What you lose: Nothing on the persistence side. The cost shows up as latency on every call and ongoing implementation complexity.
+
+Scope: Summarized memory
+What persists: A condensed version of prior conversation is generated and injected at the start of the next session.
+Cost: Lower token cost per session than replaying full history, but the summarization step drops detail that was in the original.
+When to use: Long-running conversational agents where the full history would outgrow the context budget before the conversation is done.
+What you lose: Any detail the summarizer did not preserve. The agent only sees what the summarization prompt chose to keep.
+
+Scope: No persistent memory (stateless)
+What persists: Nothing. Each session is independent.
+Cost: No overhead at all, since there is nothing to retrieve or store.
+When to use: Task-execution agents that finish and close out, or pipelines where every session is fully independent by design.
+What you lose: All prior context. If a follow-up depends on something from an earlier session, the agent has no way to reach it.
+
+2-7-2. Choosing a memory scope at agent design time
+
+The choice of how an agent remembers prior interactions belongs in the design phase, not the production refactor. An agent that helps the same user across multiple days needs to carry state between sessions, which means storing summaries or full history outside the model's context window so the next session can read them back. An agent that receives a single job, completes it, and closes it out has no prior session to recall, so it runs stateless.
+
+The default path looks reasonable at first. You store the full conversation history in the messages array, send it on every API call, and the prototype works. It keeps working for a while. The trouble starts further in, when token cost scales with every additional turn, latency climbs as the context window fills, and eventually a long session hits the hard limit and the agent stops responding. At that point, you need to refactor: pull conversation state out of the live context, put it in external storage, and add only what each turn needs. The refactor itself is mechanical, a few hundred lines of code and a database the team already has. What it costs is timing. The work happens under production pressure, usually with a deadline already in motion, and every hour spent restructuring memory is an hour not spent on whatever the agent is supposed to do next. Making the call during design phase is cheap, while doing it when it's time to refactor is more expensive.
+
+The content below outlines three memory approaches and the conditions where each fits, the overhead each carries, and the assumption that most often pushes teams toward the wrong choice.
+
+Handles well: The memory scope matches the task at design time. Use external storage when the agent continues a thread across sessions. Use stateless when each job is self-contained. Use in-context when the session is short and does not need to survive a restart.
+
+Adds cost or complexity: External storage adds retrieval latency and the read/write logic that goes with it. Summarized memory depends on a well-specified summarizer prompt; without one, task-critical state gets dropped on every compression. Neither approach is free, so weigh the costs and choose wisely.
+
+Use a different approach: Holding all state in-context on the assumption that the window will be large enough. Token cost grows with every additional turn because the full context is sent on each API call. Without caching or compaction, long sessions accumulate cost faster than teams expect when they only measure early turns. Measure actual session token usage against the window limit before committing.
+
+2-7-3. Skills: reusable instruction sets that load on demand without inflating every session
+
+The memory scope table above covers how an agent carries state across sessions. There is a related but distinct problem: how you carry repeatable instructions across tasks without paying to inject them into every session. The pattern for that is a Skill, a reusable markdown file that teaches Claude how to handle a specific kind of task once. Claude loads the Skill automatically when a request matches its description. The instructions sit on disk until they are needed; they are not resident in every conversation.
+
+A Skill lives in a SKILL.md file inside an identified directory. The file has two parts: a frontmatter block with a name and a description, and the instructions below it. The description is the matching criterion. When you send a request, Claude reads the name and description of every available Skill, compares them against your message, and loads the full instructions only when there is a match. If the instructions are not relevant to the current request, they never enter the context window.
+
+This is the key contrast with the memory patterns in the table above. In-context memory is always present and grows with every turn. CLAUDE.md behavior depends on where you are running Claude Code. In the Claude Code CLI, a CLAUDE.md file loads into every session regardless of what task is running. In the Agent SDK, whether filesystem settings including CLAUDE.md load is controlled by the settingSources configuration. Do not rely on a default: set it explicitly to the sources you intend, and confirm current default behavior against the Agent SDK reference at build time. A Skill, by contrast, loads only when the task calls for it, in both environments. For instruction sets that apply to specific recurring tasks rather than to every session, Skills are a lower-overhead pattern than either alternative.
+
+Skills vs. CLAUDE.md vs. in-context instructions: choosing the right pattern
+
+Pattern: Skill (SKILL.md)
+When it loads: On demand when the request matches the skill's description.
+Context cost: Low. Only the name and description load at startup; full content loads only on match.
+Best for: Task-specific expertise that should not inflate sessions where it is not needed. Examples include domain-specific output formats, specialized review checklists, and workflows that apply to a subset of tasks rather than every interaction.
+
+Pattern: CLAUDE.md
+When it loads: Every session, unconditionally.
+Context cost: Fixed overhead per session regardless of task.
+Best for: Always-on project standards that apply to everything. Examples include coding conventions the team has standardized on, output format rules the project requires, and constraints that hold across all tasks in the codebase.
+
+Pattern: In-context instructions
+When it loads: Present for every turn within that session.
+Context cost: Grows with session length; does not survive session end.
+Best for: Short sessions where the full history fits within the window and nothing needs to persist. Examples include one-off exploratory work and tasks scoped to a single conversation.
+
+2-7-4. Current availability: Skills on the Messages API
+
+Skills are available on the Messages API today, but the integration is in beta and the configuration is not the same as the Claude Code or Agent SDK paths. Two beta headers are required on the API request: code-execution-2025-08-25 and skills-2025-10-02. Skills invoked this way run inside the code execution container rather than in the calling application's environment, which has implications for what tools and filesystem access the Skill can rely on.
+
+Beta headers are versioned and change as features move toward general availability. Before building against this configuration in production, check the current Anthropic API documentation to confirm the header values, whether the feature has reached general availability, and whether the code execution container is still the runtime path.
+
+One important constraint: Subagents do not automatically inherit Skills from the parent session. When you delegate a task to a subagent, it starts with a clean context. Note that while Skills and conversation history do not carry over, subagents do inherit the permission context from the parent session; permission scope is not reset at delegation. If the subagent needs a Skill, you must explicitly list it in the subagent's configuration. This matters at agent design time: if you are wiring a subagent to perform a task that depends on specific instructions, those instructions need to be registered against the subagent, not assumed to carry over from the parent.
+
+2-8. Multimodal and Batch Ingestion
+
+Images, PDFs, and high-volume processing
+
+Up to now you've been managing what Claude remembers between turns. Multimodal ingestion shifts the question to what you're sending in: every image and PDF consumes context budget before Claude reads a single character of your prompt, which changes how you structure requests and what you can fit in one. The second half of this topic deals with the opposite end of the same problem. When you have thousands of inputs to process, sending one request at a time and waiting for each response stops making sense, and the Batch API is how you handle that volume without blocking your application.
+
+2-8-1. Image token cost: Calculate before you commit
+
+Images are not free in terms of context budget. Claude views images in patches: each 28×28-pixel block of the image is one visual token, so an image costs ⌈width / 28⌉ × ⌈height / 28⌉ visual tokens. A 1,000 × 1,000 pixel image is ⌈1000/28⌉ × ⌈1000/28⌉ = 36 × 36 patches, about 1,296 visual tokens. At that rate, ten high-resolution screenshots consume as much context as a detailed system prompt. Each model also has a maximum native image resolution, expressed as a long-edge limit and a visual-token limit, and these limits differ by model tier. The newest models accept substantially larger images than the standard tier. Images larger than either limit are downscaled before processing, so the formula runs on the scaled dimensions. Confirm the current per-tier limits against the Vision page (Resolution and token cost) at build time; the limits have changed between model generations and will again.
+
+The calculation matters at design time. If you are building a pipeline that processes images, measure the token cost of a typical production image against your model's context limit before you write the ingestion code. The fix for an over-budget pipeline is often a ten-minute image resize step. If you discover this after deployment, it takes even longer.
+
+2-8-2. Different ways to send an image: When each is right
+
+Inline base64
+
+How it works: Encode the image bytes as a base64 string and include the data directly in the message block.
+
+Overhead: The full encoded payload travels with every request, which inflates request size and counts against latency on large images.
+
+When to use: Best for one-off images where adding an upload step would add complexity without a payoff. The same image sent repeatedly multiplies the cost, so reach for a different method if reuse is likely.
+
+URL reference
+
+How it works: Pass a publicly reachable URL in the source block, and Claude fetches the image at request time.
+
+Overhead: No payload travels with the request, but you take on the dependency that the URL must be stable, public, and reachable at the moment Claude tries to fetch it.
+
+When to use: Best when the image is already hosted at a stable public URL you control. Skip it for anything behind auth, anything signed with a short expiry, or anything you can't guarantee will be reachable when the request runs.
+
+Files API
+
+How it works: Upload the file once through a separate API call, receive a file_id, and reference that ID in any future message.
+
+Overhead: The upload is a one-time cost; every later request carries the ID instead of the bytes, so payload overhead drops to near-zero from that point on. Currently in beta and not available on Bedrock or Vertex AI; verify availability for your deployment platform.
+
+When to use: Best when the same image or PDF appears across multiple requests, or when the asset is large enough that re-sending it would dominate request size. Also, the cleanest choice when you want asset management to live separately from inference calls, and the right choice for images that appear across multiple conversation turns, since the file_id carries no payload weight as history grows.
+
+2-8-3. Sending PDFs: The document block
+
+For PDFs, the block type is document rather than image. The source structure follows the same pattern as images, which means it can be base64, a URL, or a Files API file_id. There is no required name field on a document block. The block accepts an optional title field for a readable document name, and an optional context field for additional metadata, but neither is required to send a PDF. All other mechanics, including token cost considerations and Files API reuse, apply in the same way.
+
+{
+  "type": "document",
+  "source": {
+    "type": "base64",
+    "media_type": "application/pdf",
+    "data": "<base64-encoded-pdf-bytes>"
+  },
+  "title": "contract_review.pdf"
+}
+
+2-8-4. Applying prompting techniques to multimodal inputs
+
+The same prompting techniques from the first section apply to image and PDF analysis. A bare "describe this image" prompt produces shallow output for the same reason a bare text prompt does as Claude has no target structure to aim for.
+
+The difference is that images carry ambiguity that text cannot, which includes overlapping objects, depth and spatial relationships, and partial occlusion. A prompt for visual analysis should name how Claude should handle each type of ambiguity. "If objects overlap, describe each separately and note the overlap" is a concrete constraint that a text-only prompt would never need.
+
+2-8-5. The Message Batches API: High-volume asynchronous processing
+
+When you need to run the same prompt pattern against hundreds or thousands of inputs, the synchronous API is the wrong model. Each synchronous call blocks until complete. At scale, that means your application is either burning threads or running thousands of concurrent connections against rate limits.
+
+The Message Batches API accepts up to 100,000 or 256 MB requests (whichever comes first) in a single batch call. You submit the batch, receive a batch_id, and poll for completion. When the batch finishes, you download the results. The per-token cost for batch requests is lower than for synchronous ones.
+
+The tradeoff is latency: batch processing is non-deterministic and can take up to 24 hours, often much faster. The pattern suits offline pipelines, evaluation runs, and data processing jobs, not real-time user interactions.
+
+Use case: A user uploads a photo and expects an immediate classification.
+Right API pattern: Synchronous API.
+Why: Real-time response is required. Batch latency is unacceptable for interactive use.
+
+Use case: A nightly pipeline classifies 5,000 customer records.
+Right API pattern: Message Batches API.
+Why: Latency is not a constraint. Batch cost reduction and asynchronous processing are both valuable.
+
+Use case: An evaluation run tests a new prompt against 2,000 examples.
+Right API pattern: Message Batches API.
+Why: Offline task with no real-time requirement. Batch is the correct pattern.
+
+Use case: A chatbot generates a reply to a user's message.
+Right API pattern: Synchronous API.
+Why: The user is waiting; batch would introduce unacceptable delay.
+
+2-8-6. When multimodal and batch fit together, and when they don't
+
+The combination works for offline workloads that reuse the same assets and need structured output across thousands of inputs. A nightly pipeline classifying images against a fixed taxonomy is the textbook case: Files API removes redundant uploads, Batches API absorbs the latency, structured-output techniques keep results machine-readable.
+
+Two failure modes break the fit.
+
+The first is misreading latency: reaching for batch in any user-facing flow with an image produces a system that passes tests and fails in production, because the user is waiting and the batch isn't.
+The second is underestimating context cost: images and PDFs consume budget before Claude processes any text, so pipelines loading multiple large images per request blow past token limits at scale. Measure token cost on production-scale inputs before you build.
 `;
 
 export const quizSections: QuizSection[] = [
@@ -1005,6 +1382,431 @@ export const quizSections: QuizSection[] = [
       item("Handles well\nMulti-step agent sessions that exceed the token budget and need decomposition. Best designed at the architecture stage rather than patched in as a production fix.", "Handles well\ntoken budget을 초과하고 decomposition이 필요한 multi-step agent session에 잘 맞습니다. production fix로 덧붙이기보다 architecture stage에서 설계하는 것이 가장 좋습니다."),
       item("Use a different approach\nPipelines that never approach the window limit. Measure actual token usage against your model's context limit before adding management overhead.", "Use a different approach\nwindow limit에 가까워지지 않는 pipeline에는 다른 접근을 쓰세요. management overhead를 추가하기 전에 실제 token usage를 model의 context limit과 비교해 측정하세요."),
       item("Forward pointer\nThe strategies covered so far assume you know your context budget is under pressure and you are choosing a tool to manage it. The critical point here is not to know the pressure exists until the session breaks. A workload can pass every test in development and then fail in production for one reason: the tool output got bigger, the sessions got longer, and the context window that held twenty turns cleanly now fills at turn eight. The next section walks through exactly how that happens, using a worked postmortem of an agent that ran fine on test fixtures and then hit its ceiling once real documents started flowing through it.", "Forward pointer\n지금까지 다룬 전략들은 context budget이 압박받고 있다는 것을 알고 그것을 관리할 도구를 선택한다고 가정합니다. 여기서 중요한 점은 session이 깨지기 전까지 그 압박이 존재한다는 것을 모를 수 있다는 것입니다. workload는 development의 모든 test를 통과하고도 production에서 실패할 수 있습니다. 이유는 tool output이 커지고, session이 길어지고, 20 turn을 깔끔하게 담던 context window가 8번째 turn에서 차기 때문입니다. 다음 섹션은 test fixture에서는 잘 돌다가 실제 document가 흘러들어오자 ceiling에 도달한 agent의 worked postmortem으로 그 일이 정확히 어떻게 발생하는지 살펴봅니다.")
+    ]
+  },
+  {
+    id: "2-6-agent-construction",
+    title: "2-6. Agent Construction",
+    items: [
+      item("2-6. Agent Construction", "2-6. Agent Construction"),
+      item("Building a production agent: the loop, wiring paths, orchestration, and human-in-the-loop", "production agent 만들기: loop, wiring path, orchestration, human-in-the-loop"),
+      item("An agent is a multi-step tool-use loop with managed context and a defined goal.", "agent는 managed context와 정의된 goal을 가진 multi-step tool-use loop입니다."),
+      item("You have already built the individual pieces, including tool schemas and context management.", "이미 tool schema와 context management를 포함한 개별 구성 요소를 만들었습니다."),
+      item("This section connects them into a working system and adds the layer that neither topics cover on their own.", "이 section은 그것들을 작동하는 system으로 연결하고, 각 topic만으로는 다루지 못하는 layer를 추가합니다."),
+      item("When components run together across multiple turns, new failure modes appear that isolated testing does not catch.", "component들이 여러 turn에 걸쳐 함께 실행되면 isolated testing으로는 잡히지 않는 새로운 failure mode가 나타납니다."),
+      item("Routing decisions that worked in single-turn tests start to compound.", "single-turn test에서 잘 작동하던 routing decision이 누적되기 시작합니다."),
+      item("Context fills faster than expected.", "context는 예상보다 더 빨리 찹니다."),
+      item("A step that depends on a previous result gets the wrong input because an earlier tool call was structured incorrectly.", "이전 result에 의존하는 step이 앞선 tool call의 구조가 잘못되어 틀린 input을 받습니다."),
+      item("The question that should precede every agent build is: does this problem require an agent?", "모든 agent build에 앞서 물어야 할 질문은 이것입니다. 이 문제가 정말 agent를 필요로 하는가?"),
+      item("Agents carry coordination overhead, expanded context costs, and more surface area for failure than simpler patterns.", "agent는 더 단순한 pattern보다 coordination overhead, 더 큰 context cost, 더 넓은 failure surface를 가집니다."),
+      item("Answering that question deliberately is the first design decision.", "그 질문에 의도적으로 답하는 것이 첫 번째 design decision입니다.")
+    ]
+  },
+  {
+    id: "2-6-1-workflow-or-agent-make-this-decision-before-you-write-the-first-line",
+    title: "2-6-1. Workflow or agent: Make this decision before you write the first line",
+    items: [
+      item("2-6-1. Workflow or agent: Make this decision before you write the first line", "2-6-1. Workflow 또는 agent: 첫 줄을 쓰기 전에 이 결정을 하세요"),
+      item("The most critical mistake in agent development is choosing the wrong pattern at the start.", "agent development에서 가장 치명적인 실수는 시작할 때 wrong pattern을 선택하는 것입니다."),
+      item("Workflows and agents solve different problems: using an agent when a workflow is sufficient adds behavioral complexity without adding capability.", "workflow와 agent는 서로 다른 문제를 해결합니다. workflow로 충분한데 agent를 사용하면 capability는 늘리지 못하고 behavioral complexity만 추가합니다."),
+      item("Using a workflow when an agent is needed produces a system that breaks whenever user input deviates from the predetermined path.", "agent가 필요한데 workflow를 사용하면 user input이 predetermined path에서 벗어날 때마다 깨지는 system이 만들어집니다."),
+      item("Choose a workflow when you can enumerate the exact steps in code.", "code로 exact step을 열거할 수 있을 때 workflow를 선택하세요."),
+      item("Choose an agent when you can specify the goal and the tools but not the exact path.", "goal과 tool은 지정할 수 있지만 exact path는 지정할 수 없을 때 agent를 선택하세요."),
+      item("Choose a workflow when error cost is real and step-level guardrails matter.", "error cost가 실제이고 step-level guardrail이 중요할 때 workflow를 선택하세요."),
+      item("Choose an agent when the path through work cannot be enumerated in advance.", "work를 통과하는 path를 미리 열거할 수 없을 때 agent를 선택하세요."),
+      item("Choose a workflow when observability with standard tooling is required.", "standard tooling을 통한 observability가 필요할 때 workflow를 선택하세요."),
+      item("Choose an agent when non-determinism is acceptable and the agent's possible actions are constrained by its registered toolset.", "non-determinism을 허용할 수 있고 agent의 가능한 action이 registered toolset으로 제한될 때 agent를 선택하세요."),
+      item("Choose a workflow when the inputs are well-constrained to a known set.", "input이 알려진 set으로 잘 제한되어 있을 때 workflow를 선택하세요."),
+      item("Choose an agent when user inputs vary unpredictably in content and structure.", "user input의 content와 structure가 예측하기 어렵게 달라질 때 agent를 선택하세요."),
+      item("Choose a workflow when every execution of the task follows the same sequence.", "task의 모든 execution이 같은 sequence를 따를 때 workflow를 선택하세요."),
+      item("Choose an agent when the task requires creative sequencing of available tools.", "task가 available tool의 creative sequencing을 필요로 할 때 agent를 선택하세요.")
+    ]
+  },
+  {
+    id: "2-6-2-the-agent-is-the-pattern-the-wiring-path-is-an-implementation-choice",
+    title: "2-6-2. The agent is the pattern. The wiring path is an implementation choice.",
+    items: [
+      item("2-6-2. The agent is the pattern. The wiring path is an implementation choice.", "2-6-2. agent가 pattern입니다. wiring path는 implementation choice입니다."),
+      item("Once you have decided the task needs an agent, you have also decided on a pattern: a loop that calls tools, manages context, and runs until a goal is met.", "task에 agent가 필요하다고 결정했다면 pattern도 결정한 것입니다. tool을 호출하고 context를 관리하며 goal이 충족될 때까지 실행되는 loop입니다."),
+      item("For single-agent systems, that pattern is constant across all three wiring paths.", "single-agent system에서는 그 pattern이 세 가지 wiring path 모두에서 동일합니다."),
+      item("Multi-agent architectures, where a planner, executor, and evaluator run as separate agents handing off through structured artifacts, introduce additional design decisions beyond the loop itself.", "planner, executor, evaluator가 별도 agent로 실행되고 structured artifact를 통해 handoff하는 multi-agent architecture는 loop 자체를 넘어서는 추가 design decision을 도입합니다."),
+      item("Those patterns are covered later in this track.", "그 pattern들은 이 track의 뒤쪽에서 다룹니다."),
+      item("That pattern does not change based on how you build it, what changes is how much of the loop you write yourself versus how much you hand to a library or a hosted service.", "그 pattern은 어떻게 build하느냐에 따라 바뀌지 않습니다. 바뀌는 것은 loop 중 얼마나 직접 작성하고 얼마나 library나 hosted service에 맡기느냐입니다."),
+      item("There are three wiring paths, and they sit on a spectrum of how much infrastructure you own.", "세 가지 wiring path가 있으며, 이들은 얼마나 많은 infrastructure를 소유하느냐의 spectrum 위에 있습니다."),
+      item("You can write the loop directly against the Messages API, which gives you full control and full responsibility.", "Messages API를 상대로 loop를 직접 작성할 수 있으며, 이는 full control과 full responsibility를 줍니다."),
+      item("You can use the Agent SDK, which runs the same loop inside your own process and hands you tool execution, context management, and the iteration structure already built.", "Agent SDK를 사용할 수도 있습니다. 이는 같은 loop를 자신의 process 안에서 실행하며 tool execution, context management, iteration structure를 이미 갖춘 형태로 제공합니다."),
+      item("Or you can use Claude Managed Agents (currently in public beta), where Anthropic runs the loop and the sandbox and your application streams events in and results back.", "또는 Claude Managed Agents(현재 public beta)를 사용할 수 있습니다. 여기서는 Anthropic이 loop와 sandbox를 실행하고 application은 event를 보내고 result를 다시 받습니다."),
+      item("The sections that follow teach the loop itself, because the loop is what stays constant.", "이어지는 section들은 loop 자체를 가르칩니다. 변하지 않는 것은 loop이기 때문입니다."),
+      item("The path you choose decides who maintains the parts around it.", "선택한 path는 그 주변 부분을 누가 유지보수할지 결정합니다.")
+    ]
+  },
+  {
+    id: "2-6-3-wiring-paths-who-runs-the-loop-and-what-you-take-on",
+    title: "2-6-3. Wiring paths: who runs the loop, and what you take on",
+    items: [
+      item("2-6-3. Wiring paths: who runs the loop, and what you take on", "2-6-3. Wiring path: 누가 loop를 실행하고, 무엇을 떠안는가"),
+      item("The three paths differ in one variable: how much of the agent's runtime you own.", "세 가지 path는 하나의 변수에서 다릅니다. agent runtime 중 얼마나 직접 소유하느냐입니다."),
+      item("The table is ordered from top to bottom by how much infrastructure you hand off.", "table은 얼마나 많은 infrastructure를 넘겨주는지에 따라 위에서 아래로 정렬되어 있습니다."),
+      item("Choose based on your deployment and compliance constraints, don't be tempted to choose the path that is just fastest to prototype.", "deployment와 compliance constraint를 기준으로 선택하세요. prototype이 가장 빠르다는 이유만으로 path를 고르고 싶은 유혹에 넘어가지 마세요."),
+      item("1. Raw Messages API loop", "1. Raw Messages API loop"),
+      item("Who runs the loop: Your code runs every iteration.", "Who runs the loop: 코드가 모든 iteration을 실행합니다."),
+      item("You send the request, read the tool-use blocks, execute the tools, and append the results yourself.", "request를 보내고, tool-use block을 읽고, tool을 실행하고, result를 직접 append합니다."),
+      item("What you own: The full loop, tool execution, context management, retries, and exit conditions.", "What you own: full loop, tool execution, context management, retry, exit condition을 직접 소유합니다."),
+      item("Nothing is provided for you.", "자동으로 제공되는 것은 없습니다."),
+      item("Choose this when: You need full control over each step, you have constraints a library does not accommodate, or you are teaching yourself how the loop works before adding abstraction.", "Choose this when: 각 step에 대한 full control이 필요하거나, library가 수용하지 못하는 constraint가 있거나, abstraction을 추가하기 전에 loop가 어떻게 작동하는지 직접 배우고 싶을 때 선택하세요."),
+      item("What to check before committing: The maintenance cost is yours.", "What to check before committing: maintenance cost는 직접 부담해야 합니다."),
+      item("Every behavior the SDK would give you for free, including context management and parallel tool handling, becomes code you write and test.", "context management와 parallel tool handling을 포함해 SDK가 무료로 제공했을 모든 behavior가 직접 작성하고 test해야 하는 code가 됩니다."),
+      item("2. Agent SDK", "2. Agent SDK"),
+      item("Who runs the loop: The SDK runs the loop inside your own process.", "Who runs the loop: SDK가 자신의 process 안에서 loop를 실행합니다."),
+      item("It iterates and manages context, and your code still executes the tools the agent calls.", "SDK가 iterate하고 context를 관리하며, agent가 호출한 tool은 여전히 코드가 실행합니다."),
+      item("What you own: Tool execution and the surrounding application.", "What you own: tool execution과 surrounding application을 직접 소유합니다."),
+      item("The SDK provides the loop structure, context management, and tool registration.", "SDK는 loop structure, context management, tool registration을 제공합니다."),
+      item("Choose this when: You want the loop, context handling, and tool scaffolding that power Claude Code without rebuilding them, and you want the agent running in your own environment in Python or TypeScript.", "Choose this when: Claude Code를 움직이는 loop, context handling, tool scaffolding을 다시 만들지 않고 사용하고 싶고, agent를 Python 또는 TypeScript 환경에서 직접 실행하고 싶을 때 선택하세요."),
+      item("What to check before committing: Whether filesystem-based features like CLAUDE.md and skills load in the Agent SDK is controlled by the settingSources configuration.", "What to check before committing: CLAUDE.md와 skills 같은 filesystem-based feature가 Agent SDK에서 load되는지는 settingSources configuration이 제어합니다."),
+      item("Do not rely on a default: always set settingSources explicitly to the sources you intend, for example, [\"user\", \"project\", \"local\"] to match Claude Code CLI behavior, or [] to run fully isolated with only what you pass programmatically.", "default에 의존하지 마세요. Claude Code CLI behavior와 맞추려면 [\"user\", \"project\", \"local\"]처럼, programmatically 전달한 것만으로 완전히 isolated하게 실행하려면 []처럼 의도한 source를 settingSources에 항상 명시적으로 설정하세요."),
+      item("Confirm current default behavior against the Agent SDK reference at build time.", "build time에 Agent SDK reference를 기준으로 current default behavior를 확인하세요."),
+      item("3. Claude Managed Agents", "3. Claude Managed Agents"),
+      item("Who runs the loop: Anthropic runs the loop and the sandbox.", "Who runs the loop: Anthropic이 loop와 sandbox를 실행합니다."),
+      item("Your application sends user events and streams results back over server-sent events.", "application은 user event를 보내고 server-sent event를 통해 result를 stream으로 돌려받습니다."),
+      item("What you own: The application layer and the agent definition.", "What you own: application layer와 agent definition을 직접 소유합니다."),
+      item("You define the model, system prompt, tools, MCP servers, and skills once, then reference the agent by ID across sessions.", "model, system prompt, tool, MCP server, skill을 한 번 정의한 뒤 session 전반에서 agent ID로 참조합니다."),
+      item("Choose this when: You need long-running execution measured in minutes or hours, you want a managed sandbox, or you want to avoid building the loop, the sandbox, and the tool-execution layer at all.", "Choose this when: 분 또는 시간 단위의 long-running execution이 필요하거나, managed sandbox를 원하거나, loop, sandbox, tool-execution layer를 아예 만들고 싶지 않을 때 선택하세요."),
+      item("Also available on Claude Platform on AWS with some feature differences, verify capability parity against your deployment surface before committing.", "Claude Platform on AWS에서도 사용할 수 있지만 일부 feature 차이가 있으므로, 결정하기 전에 deployment surface 기준으로 capability parity를 확인하세요."),
+      item("What to check before committing: Sessions are stateful and stored server-side, which means they are not currently eligible for Zero Data Retention or a HIPAA Business Associate Agreement.", "What to check before committing: session은 stateful하며 server-side에 저장됩니다. 즉 현재 Zero Data Retention 또는 HIPAA Business Associate Agreement 대상이 아닙니다."),
+      item("See Anthropic API data retention documentation at platform.claude.com and verify it at publish.", "platform.claude.com의 Anthropic API data retention documentation을 보고 publish 시점에 확인하세요."),
+      item("Currently in public beta, all endpoints require the managed-agents-2026-04-01 beta header and behaviors may be refined between releases.", "현재 public beta이며, 모든 endpoint에는 managed-agents-2026-04-01 beta header가 필요하고 release 사이에 behavior가 조정될 수 있습니다."),
+      item("Build with a migration plan in place.", "migration plan을 마련한 상태로 build하세요.")
+    ]
+  },
+  {
+    id: "2-6-4-claude-managed-agents-when-to-use",
+    title: "2-6-4. Claude Managed Agents: when to use",
+    items: [
+      item("2-6-4. Claude Managed Agents: when to use", "2-6-4. Claude Managed Agents: 언제 사용할 것인가"),
+      item("The table above lists Managed Agents as the third path.", "위 table은 Managed Agents를 세 번째 path로 제시합니다."),
+      item("Let's make that choice concrete because for some workloads it's the right default.", "일부 workload에서는 이것이 올바른 default이므로, 그 선택을 구체화해 봅시다."),
+      item("Here's the core difference: with a raw loop or the Agent SDK, your code runs the iteration.", "핵심 차이는 이것입니다. raw loop나 Agent SDK에서는 코드가 iteration을 실행합니다."),
+      item("You send each request, read the tool-use blocks, run the tools, and append the results.", "각 request를 보내고, tool-use block을 읽고, tool을 실행하고, result를 append합니다."),
+      item("With Managed Agents, Anthropic runs the loop and the sandbox for you.", "Managed Agents에서는 Anthropic이 loop와 sandbox를 대신 실행합니다."),
+      item("Your application defines the agent once (model, system prompt, tools, MCP servers, skills), refers to it by ID, sends user events, and streams the results back over server-sent events.", "application은 agent를 한 번 정의하고(model, system prompt, tools, MCP servers, skills), ID로 참조하며, user event를 보내고 server-sent event로 result를 stream합니다."),
+      item("What you stop owning, and what you take on instead", "더 이상 직접 소유하지 않는 것과 대신 맡게 되는 것"),
+      item("Category: Execution & infrastructure\nWhat you stop owning: The iteration loop, the execution sandbox, the retries inside the loop, and the tool-execution runtime. Anthropic runs all of it server-side.\nWhat you take on instead: An agent definition managed as a versioned API resource, plus an application layer that sends events and consumes the streamed results.", "Category: Execution & infrastructure\nWhat you stop owning: iteration loop, execution sandbox, loop 안의 retry, tool-execution runtime을 직접 소유하지 않습니다. Anthropic이 모두 server-side에서 실행합니다.\nWhat you take on instead: versioned API resource로 관리되는 agent definition과 event를 보내고 streamed result를 소비하는 application layer를 맡습니다."),
+      item("Category: Session duration & state\nWhat you stop owning: Long-running execution management. Sessions can run for minutes or hours without your process holding the loop open.\nWhat you take on instead: Server-side session state. Sessions are stateful and stored by Anthropic, and are subject to its data handling policies and constraints (see the constraint note below).", "Category: Session duration & state\nWhat you stop owning: long-running execution management를 직접 소유하지 않습니다. process가 loop를 열어두지 않아도 session은 몇 분 또는 몇 시간 동안 실행될 수 있습니다.\nWhat you take on instead: server-side session state를 받아들입니다. session은 stateful이고 Anthropic에 저장되며 data handling policy와 constraint의 적용을 받습니다."),
+      item("Category: Sandbox lifecycle\nWhat you stop owning: Sandbox provisioning and teardown for tool execution.\nWhat you take on instead: A dependency on the managed sandbox's available tools and its execution model, rather than your own environment.", "Category: Sandbox lifecycle\nWhat you stop owning: tool execution을 위한 sandbox provisioning과 teardown을 직접 소유하지 않습니다.\nWhat you take on instead: 자신의 environment가 아니라 managed sandbox의 available tool과 execution model에 의존하게 됩니다."),
+      item("The task runs long: Execution measured in minutes or hours is awkward to hold open in your own process, and the managed loop is built for exactly that.", "task가 길게 실행될 때: 분 또는 시간 단위의 execution을 자신의 process 안에 열어두기는 까다롭고, managed loop는 바로 그 용도를 위해 만들어졌습니다."),
+      item("You want a managed sandbox: If you'd otherwise be building and securing an execution environment for tool calls, using Managed Agents takes a large piece of infrastructure off your plate.", "managed sandbox를 원할 때: tool call을 위한 execution environment를 직접 만들고 보호해야 한다면, Managed Agents는 큰 infrastructure 부담을 덜어 줍니다."),
+      item("You'd rather not build the loop, the sandbox, and the tool-execution layer at all: You are willing to define the agent as an API resource instead.", "loop, sandbox, tool-execution layer를 아예 만들고 싶지 않을 때: 대신 agent를 API resource로 정의하는 방식을 받아들이는 것입니다."),
+      item("Managed Agent sessions are stateful and stored server-side.", "Managed Agent session은 stateful이며 server-side에 저장됩니다."),
+      item("That storage is the reason these sessions aren't currently eligible for Zero Data Retention or a HIPAA Business Associate Agreement.", "그 저장 방식 때문에 현재 이 session들은 Zero Data Retention 또는 HIPAA Business Associate Agreement 대상이 아닙니다."),
+      item("So, if your workload carries PHI or falls under a ZDR requirement, this path is ruled out no matter how well it fits operationally, and you route to the Agent SDK or a raw loop on a covered configuration instead.", "따라서 workload가 PHI를 다루거나 ZDR requirement에 해당한다면, 운영상 잘 맞더라도 이 path는 제외되고 covered configuration의 Agent SDK 또는 raw loop로 가야 합니다."),
+      item("The governing constraint picks the path before convenience gets a say.", "governing constraint가 convenience보다 먼저 path를 결정합니다."),
+      item("A common progression is to prototype on the Agent SDK locally, then move to Managed Agents for production.", "일반적인 progression은 local에서 Agent SDK로 prototype을 만들고 production에서는 Managed Agents로 옮기는 것입니다."),
+      item("Expect a re-expression step, not a direct export.", "direct export가 아니라 re-expression step이 필요하다고 예상하세요."),
+      item("Handles well: Long-running agents, and workloads where you'd rather not build or secure a sandbox and loop yourself.", "Handles well: long-running agent와 sandbox 및 loop를 직접 만들거나 보호하고 싶지 않은 workload에 잘 맞습니다."),
+      item("Adds cost or complexity: Server-side stateful sessions, an agent-as-resource definition format, and a beta surface that can change between releases.", "Adds cost or complexity: server-side stateful session, agent-as-resource definition format, release 사이에 바뀔 수 있는 beta surface가 추가됩니다."),
+      item("Use a different approach: For PHI or ZDR workloads, or when you need full in-process control, stay on the Agent SDK or a raw loop on a covered configuration.", "Use a different approach: PHI 또는 ZDR workload이거나 full in-process control이 필요하다면 covered configuration의 Agent SDK 또는 raw loop에 머무르세요.")
+    ]
+  },
+  {
+    id: "2-6-5-wiring-the-loop-the-four-steps-that-hold-across-every-path",
+    title: "2-6-5. Wiring the loop: the four steps that hold across every path",
+    items: [
+      item("2-6-5. Wiring the loop: the four steps that hold across every path", "2-6-5. Loop 연결하기: 모든 path에 공통으로 적용되는 네 단계"),
+      item("The four steps below define a working agent loop no matter which path you build on.", "아래 네 단계는 어떤 path 위에 build하든 작동하는 agent loop를 정의합니다."),
+      item("When you write the loop against the Messages API, you implement all four yourself.", "Messages API를 상대로 loop를 작성하면 네 단계를 모두 직접 구현합니다."),
+      item("When you use the Agent SDK, it provides the structure for registering tools, setting the system prompt, and iterating the loop, and your code still handles tool execution.", "Agent SDK를 사용하면 tool registration, system prompt 설정, loop iteration을 위한 구조를 제공하지만, tool execution은 여전히 코드가 처리합니다."),
+      item("The steps are the same; what differs is how much you write versus inherit.", "step은 같습니다. 다른 것은 얼마나 직접 작성하고 얼마나 물려받느냐입니다."),
+      item("Register tools: Each tool follows the same schema structure. The SDK registers them against the agent, so Claude knows what is available.", "Register tools: 각 tool은 같은 schema structure를 따릅니다. SDK가 agent에 tool을 등록하므로 Claude는 무엇을 사용할 수 있는지 알게 됩니다."),
+      item("Set the system prompt: Scope it to the agent's task. A broad system prompt produces broader, less reliable tool routing.", "Set the system prompt: agent의 task에 맞게 scope를 좁히세요. broad system prompt는 더 넓고 덜 reliable한 tool routing을 만듭니다."),
+      item("A system prompt that names the specific task and the tools available for it produces more consistent behavior.", "specific task와 그 task에 available한 tool을 명시하는 system prompt는 더 consistent한 behavior를 만듭니다."),
+      item("Handle the tool-use loop: Whether you iterate the loop yourself or the SDK iterates it for you, your code handles execution.", "Handle the tool-use loop: 직접 loop를 iterate하든 SDK가 대신 iterate하든 execution은 코드가 처리합니다."),
+      item("Every tool call Claude issues must be executed by your code and returned in a tool-result block.", "Claude가 발행한 모든 tool call은 코드가 실행하고 tool-result block으로 반환해야 합니다."),
+      item("Define exit conditions: The agent loop runs until it receives a stop condition.", "Define exit conditions: agent loop는 stop condition을 받을 때까지 실행됩니다."),
+      item("Without explicit exit conditions, the agent will continue requesting tool calls beyond what the task requires.", "명시적인 exit condition이 없으면 agent는 task가 요구하는 범위를 넘어 tool call을 계속 요청합니다."),
+      item("You should define when done means done.", "done이 무엇을 의미하는지 정의해야 합니다.")
+    ]
+  },
+  {
+    id: "2-6-6-loop-wiring-checklist-verify-these-regardless-of-path",
+    title: "2-6-6. Loop wiring checklist: verify these regardless of path",
+    items: [
+      item("2-6-6. Loop wiring checklist: verify these regardless of path", "2-6-6. Loop wiring checklist: path와 상관없이 확인할 것"),
+      item("#: 1\nItem: Tools registered\nWhat to verify: Every tool the agent may need is in the registration list. No unregistered tools are referenced in the system prompt.", "#: 1\nItem: Tools registered\nWhat to verify: agent가 필요로 할 수 있는 모든 tool이 registration list에 있어야 합니다. system prompt에서 unregistered tool을 참조하면 안 됩니다."),
+      item("#: 2\nItem: System prompt scoped\nWhat to verify: The system prompt names the task and the available tools. It does not describe tools the agent does not have. It does not omit tools the agent does have that require scoping guidance.", "#: 2\nItem: System prompt scoped\nWhat to verify: system prompt는 task와 available tool을 명시해야 합니다. agent가 갖지 않은 tool을 설명하지 않고, scoping guidance가 필요한 tool을 빠뜨리지 않아야 합니다."),
+      item("#: 3\nItem: Tool-use loop implemented\nWhat to verify: Your code handles every tool-use block Claude issues and returns a tool-result block for each one before the next assistant turn. All tool-use blocks from a single assistant turn must be resolved together.", "#: 3\nItem: Tool-use loop implemented\nWhat to verify: 코드는 Claude가 발행한 모든 tool-use block을 처리하고 다음 assistant turn 전에 각각에 대한 tool-result block을 반환해야 합니다. 단일 assistant turn의 모든 tool-use block은 함께 resolve되어야 합니다."),
+      item("#: 4\nItem: HITL insertion point defined\nWhat to verify: At least one point in the loop has a human-in-the-loop check. See the section below for where to insert it.", "#: 4\nItem: HITL insertion point defined\nWhat to verify: loop의 최소 한 지점에는 human-in-the-loop check가 있어야 합니다. 어디에 넣을지는 아래 section을 보세요."),
+      item("#: 5\nItem: Exit conditions defined\nWhat to verify: The loop has a clear stopping criterion that does not depend on Claude volunteering to stop.", "#: 5\nItem: Exit conditions defined\nWhat to verify: loop에는 Claude가 자발적으로 멈추겠다고 말하는 것에 의존하지 않는 명확한 stopping criterion이 있어야 합니다.")
+    ]
+  },
+  {
+    id: "2-6-7-human-in-the-loop-hitl-insertion-points-and-when-each-applies",
+    title: "2-6-7. Human-in-the-loop (HITL): Insertion points and when each applies",
+    items: [
+      item("2-6-7. Human-in-the-loop (HITL): Insertion points and when each applies", "2-6-7. Human-in-the-loop (HITL): 삽입 지점과 적용 시점"),
+      item("A human-in-the-loop checkpoint pauses agent execution and routes to a human review step before proceeding.", "human-in-the-loop checkpoint는 agent execution을 일시 중지하고 진행 전에 human review step으로 보냅니다."),
+      item("The question that determines where to insert one is: what is the worst possible outcome if this step runs without a human check?", "어디에 넣을지를 결정하는 질문은 이것입니다. 이 step이 human check 없이 실행될 때 가능한 최악의 결과는 무엇인가?"),
+      item("Insertion point: Before a destructive tool call\nWhat triggers the check: The agent is about to execute a write, delete, or send operation.\nRisk level it addresses: High — irreversible actions where a wrong call cannot be undone.", "Insertion point: destructive tool call 전\nWhat triggers the check: agent가 write, delete, send operation을 실행하려고 할 때입니다.\nRisk level it addresses: High — 잘못된 call을 되돌릴 수 없는 irreversible action을 다룹니다."),
+      item("Insertion point: After a planning step\nWhat triggers the check: The agent has generated a plan and is about to begin executing it.\nRisk level it addresses: Medium — incorrect plans that would produce the wrong outcome even if all steps execute correctly.", "Insertion point: planning step 후\nWhat triggers the check: agent가 plan을 생성했고 실행을 시작하려고 할 때입니다.\nRisk level it addresses: Medium — 모든 step이 올바르게 실행되어도 잘못된 outcome을 만들 수 있는 incorrect plan을 다룹니다."),
+      item("Insertion point: On unexpected output\nWhat triggers the check: The tool result contains an error flag, an empty result, or a value outside expected bounds.\nRisk level it addresses: Variable — catches failure modes that retry logic alone will not resolve.", "Insertion point: unexpected output 발생 시\nWhat triggers the check: tool result에 error flag, empty result, expected bounds 밖의 value가 있을 때입니다.\nRisk level it addresses: Variable — retry logic만으로 해결되지 않는 failure mode를 잡습니다.")
+    ]
+  },
+  {
+    id: "2-6-8-tool-orchestration-over-tooling-and-under-tooling",
+    title: "2-6-8. Tool orchestration: Over-tooling and under-tooling",
+    items: [
+      item("2-6-8. Tool orchestration: Over-tooling and under-tooling", "2-6-8. Tool orchestration: over-tooling과 under-tooling"),
+      item("The agent's routing behavior is shaped by two things, including how tools are described and how many tools are registered.", "agent의 routing behavior는 tool이 어떻게 설명되는지와 얼마나 많은 tool이 등록되어 있는지에 의해 형성됩니다."),
+      item("Too many tools with overlapping descriptions produce erratic routing.", "description이 겹치는 tool이 너무 많으면 erratic routing이 발생합니다."),
+      item("Too few tools force the agent to either hallucinate a path or return an incomplete result.", "tool이 너무 적으면 agent가 path를 hallucinate하거나 incomplete result를 반환하게 됩니다."),
+      item("Over-tooling is the more common problem in production agents.", "production agent에서는 over-tooling이 더 흔한 문제입니다."),
+      item("Teams register every tool they might need \"just in case\" and discover that Claude's selection quality degrades as the tool surface grows.", "팀은 혹시 몰라 필요할지도 모르는 모든 tool을 등록하고, tool surface가 커질수록 Claude의 selection quality가 떨어진다는 것을 발견합니다."),
+      item("Start with the minimum set required for the task and add tools only when a specific gap in capability is confirmed.", "task에 필요한 minimum set으로 시작하고, capability의 specific gap이 확인될 때만 tool을 추가하세요."),
+      item("When agents are the right call: Goal-directed tasks where the exact path cannot be enumerated in advance. Handling variable inputs that would require dozens of conditional branches in a workflow.", "When agents are the right call: exact path를 미리 열거할 수 없는 goal-directed task에 적합합니다. workflow에서 수십 개의 conditional branch가 필요할 variable input을 처리할 때도 적합합니다."),
+      item("What you take on when you use an Agent: Agents add behavioral complexity: the path through the task emerges from the model's reasoning over accumulated context rather than from explicit branching logic in your code.", "What you take on when you use an Agent: agent는 behavioral complexity를 추가합니다. task를 통과하는 path는 code의 explicit branching logic이 아니라 accumulated context에 대한 model의 reasoning에서 나옵니다."),
+      item("Observability requires transcript-level tooling rather than standard operational logging.", "observability에는 standard operational logging이 아니라 transcript-level tooling이 필요합니다."),
+      item("When to choose a workflow instead: When you can enumerate the steps in code, use a workflow.", "When to choose a workflow instead: step을 code로 열거할 수 있으면 workflow를 사용하세요."),
+      item("Agents are the last step in progression.", "agent는 progression의 마지막 단계입니다."),
+      item("Start with the simplest pattern that solves the problem, a single API call, then a workflow, then an agent.", "문제를 해결하는 가장 단순한 pattern에서 시작하세요. single API call, 그다음 workflow, 그다음 agent입니다."),
+      item("And move up only when the simpler pattern cannot handle the variability the task requires.", "그리고 더 단순한 pattern이 task가 요구하는 variability를 처리할 수 없을 때만 올라가세요.")
+    ]
+  },
+  {
+    id: "2-6-9-regulated-data-constraints-set-your-delivery-route-and-credentials-before-you-write-the-wiring",
+    title: "2-6-9. Regulated data constraints set your delivery route and credentials before you write the wiring",
+    items: [
+      item("2-6-9. Regulated data constraints set your delivery route and credentials before you write the wiring", "2-6-9. Regulated data constraint는 wiring을 작성하기 전에 delivery route와 credential을 결정합니다."),
+      item("If your data needs to be handled with specific constraints (e.g., attorney-client privilege, HIPAA, GDPR, FedRAMP, or an internal data-residency policy), that constraint decides which endpoint your code calls, which credentials it carries, and where its logs land before you make a single design choice about prompts, tools, or memory.", "data가 특정 constraint를 따라 처리되어야 한다면(예: attorney-client privilege, HIPAA, GDPR, FedRAMP, internal data-residency policy), prompt, tool, memory에 대한 design choice를 하기 전에 그 constraint가 code가 호출할 endpoint, 사용할 credential, log가 남을 위치를 결정합니다."),
+      item("As a developer you usually do not pick the surface, but you do write the code that targets a specific endpoint, attaches credentials, configures the region, and emits logs.", "developer는 보통 surface를 직접 고르지는 않지만, 특정 endpoint를 target하고 credential을 붙이고 region을 설정하고 log를 내보내는 code를 작성합니다."),
+      item("Get the governing constraint named at the start, because the wrong client configuration is much more expensive to undo after the agent is wired than to set correctly the first time.", "처음에 governing constraint의 이름을 명확히 하세요. agent가 이미 연결된 뒤 wrong client configuration을 되돌리는 것은 처음부터 올바르게 설정하는 것보다 훨씬 비쌉니다."),
+      item("The five constraints below cover the cases you are most likely to hit in production.", "아래 다섯 가지 constraint는 production에서 가장 자주 마주칠 case를 다룹니다."),
+      item("Constraint: Attorney-client privilege\nWhat it tends to rule out in code: Calls from a consumer-grade Claude.ai surface that the firm cannot audit end-to-end. Code paths that send privileged document content to any endpoint the firm has not approved for privileged material, regardless of how the prompt or system message is structured.", "Constraint: Attorney-client privilege\nWhat it tends to rule out in code: firm이 end-to-end로 audit할 수 없는 consumer-grade Claude.ai surface의 call입니다. prompt나 system message가 어떻게 구성되었든, firm이 privileged material용으로 승인하지 않은 endpoint에 privileged document content를 보내는 code path도 제외됩니다."),
+      item("What usually survives a code review: Direct API or SDK calls from inside the firm's own application, authenticated via SSO, routed through a firm-approved LLM gateway with full request and response logging.", "What usually survives a code review: firm 자체 application 안에서 이루어지는 direct API 또는 SDK call입니다. SSO로 인증되고, full request and response logging을 갖춘 firm-approved LLM gateway를 통해 routing됩니다."),
+      item("Note that Anthropic's native Compliance Conversation content (prompts, responses, and tool call payloads) is not captured by Anthropic by default on direct API traffic, so the organization must implement conversation logging in the application layer and route it to an approved log destination.", "direct API traffic에서는 Anthropic의 native Compliance Conversation content(prompt, response, tool call payload)가 기본적으로 Anthropic에 capture되지 않으므로, organization은 application layer에서 conversation logging을 구현하고 approved log destination으로 routing해야 합니다."),
+      item("Constraint: HIPAA (PHI handling)\nWhat it tends to rule out in code: Code that sends Protected Health Information to any endpoint or delivery route not covered by a Business Associate Agreement for the specific configuration in use. This includes any logging or retention path your code writes to that has not been scoped under the same BAA.", "Constraint: HIPAA (PHI handling)\nWhat it tends to rule out in code: 사용 중인 specific configuration에 대한 Business Associate Agreement로 cover되지 않는 endpoint나 delivery route에 Protected Health Information을 보내는 code입니다. 같은 BAA scope에 포함되지 않은 logging 또는 retention path도 포함됩니다."),
+      item("What usually survives a code review: Direct API or SDK calls on a BAA-covered configuration.", "What usually survives a code review: BAA-covered configuration에서의 direct API 또는 SDK call입니다."),
+      item("BAA coverage for Anthropic first-party API access is arranged with Anthropic, which provisions a dedicated HIPAA-enabled organization that enforces feature restrictions on its own end.", "Anthropic first-party API access의 BAA coverage는 Anthropic과 arrange하며, Anthropic은 자체적으로 feature restriction을 enforce하는 dedicated HIPAA-enabled organization을 provision합니다."),
+      item("An alternative is a cloud-mediated route via AWS Bedrock or GCP Vertex on the partner's existing HIPAA-eligible cloud account.", "대안은 partner의 기존 HIPAA-eligible cloud account에서 AWS Bedrock 또는 GCP Vertex를 통한 cloud-mediated route입니다."),
+      item("Note: the BAA does not cover Console, Workbench, beta features, or consumer plans. Not all API features are covered under the BAA, verify the current feature eligibility list in Anthropic's Implementation Guide before configuring.", "Note: BAA는 Console, Workbench, beta feature, consumer plan을 cover하지 않습니다. 모든 API feature가 BAA 아래 cover되는 것은 아니므로 configuration 전에 Anthropic Implementation Guide에서 current feature eligibility list를 확인하세요."),
+      item("Constraint: GDPR and data residency\nWhat it tends to rule out in code: Delivery routes where the region of model execution cannot be pinned in code, or where the request can be served from a region outside the approved geographic boundary.", "Constraint: GDPR and data residency\nWhat it tends to rule out in code: model execution region을 code에서 pin할 수 없거나, approved geographic boundary 밖의 region에서 request가 처리될 수 있는 delivery route입니다."),
+      item("Defaulting to a global endpoint without specifying region is the common pattern that breaks here.", "region을 지정하지 않고 global endpoint를 default로 쓰는 것이 여기서 깨지는 흔한 pattern입니다."),
+      item("What usually survives a code review: A cloud-mediated route such as Bedrock or Vertex, with the region pinned in the client configuration to a covered jurisdiction.", "What usually survives a code review: Bedrock 또는 Vertex 같은 cloud-mediated route이며, client configuration에서 region을 covered jurisdiction으로 pin합니다."),
+      item("The direct Anthropic API is a separate case; it does not currently provide EU data residency, so partners with EU data residency requirements should route through Bedrock or Vertex rather than calling the API directly.", "direct Anthropic API는 별도 case입니다. 현재 EU data residency를 제공하지 않으므로 EU data residency requirement가 있는 partner는 API를 직접 호출하기보다 Bedrock 또는 Vertex를 통해 route해야 합니다."),
+      item("Constraint: FedRAMP and government\nWhat it tends to rule out in code: Any code path that calls an endpoint not on an authorized cloud environment at the required impact level.", "Constraint: FedRAMP and government\nWhat it tends to rule out in code: required impact level의 authorized cloud environment에 있지 않은 endpoint를 호출하는 모든 code path입니다."),
+      item("This includes development and test paths that hit the commercial endpoint while production hits the authorized one, because credentials and code patterns leak between them.", "production은 authorized endpoint를 쓰면서 development와 test path는 commercial endpoint를 치는 경우도 포함됩니다. credential과 code pattern이 서로 새어 나갈 수 있기 때문입니다."),
+      item("What usually survives a code review: Three authorized routes exist as of publish time. Claude for Government (C4G) carries a direct FedRAMP High authorization held through Palantir Federal Cloud Service – Supporting Services (PFCS-SS). Claude via Amazon Bedrock GovCloud is approved for FedRAMP High and DoD IL4/5 workloads. Claude via Vertex AI Assured Workloads is also FedRAMP authorized.", "What usually survives a code review: publish time 기준 세 가지 authorized route가 있습니다. Claude for Government(C4G)는 Palantir Federal Cloud Service – Supporting Services(PFCS-SS)를 통해 direct FedRAMP High authorization을 갖습니다. Amazon Bedrock GovCloud를 통한 Claude는 FedRAMP High 및 DoD IL4/5 workload에 승인되어 있습니다. Vertex AI Assured Workloads를 통한 Claude도 FedRAMP authorized입니다."),
+      item("Claude Enterprise on AWS Marketplace is not FedRAMP authorized, so teams requiring FedRAMP compliance must use one of the three routes above. Verify current authorization status at trust.anthropic.com before configuring.", "AWS Marketplace의 Claude Enterprise는 FedRAMP authorized가 아니므로 FedRAMP compliance가 필요한 team은 위 세 route 중 하나를 사용해야 합니다. configuration 전에 trust.anthropic.com에서 current authorization status를 확인하세요."),
+      item("Constraint: Internal data-residency policy\nWhat it tends to rule out in code: Calls from any SDK client configured against a cloud vendor outside the partner's approved list, regardless of whether the underlying technical capability would support the workload.", "Constraint: Internal data-residency policy\nWhat it tends to rule out in code: underlying technical capability가 workload를 지원하더라도, partner의 approved list 밖 cloud vendor를 대상으로 구성된 SDK client의 call은 제외됩니다."),
+      item("Procurement-level constraints rule the code path out before engineering preferences enter the conversation.", "procurement-level constraint는 engineering preference가 논의되기 전에 code path를 제외합니다."),
+      item("What usually survives a code review: The delivery route on the partner's approved cloud vendor. In code terms, that is whichever SDK client and endpoint configuration their CIO has already cleared.", "What usually survives a code review: partner가 승인한 cloud vendor의 delivery route입니다. code 관점에서는 CIO가 이미 승인한 SDK client와 endpoint configuration입니다."),
+      item("Build against that one rather than switching mid-project because another route looks easier.", "다른 route가 더 쉬워 보인다고 중간에 바꾸지 말고, 승인된 route를 기준으로 build하세요."),
+      item("This table covers the constraints that directly determine endpoint selection and credential configuration.", "이 table은 endpoint selection과 credential configuration을 직접 결정하는 constraint를 다룹니다."),
+      item("SOC 2 is not in scope here. It governs how your systems are built and operated, not which endpoint your code calls, and is covered in Module 4 alongside other security posture and audit requirements.", "SOC 2는 여기 scope가 아닙니다. SOC 2는 code가 어떤 endpoint를 호출하는지가 아니라 system이 어떻게 build되고 운영되는지를 다루며, Module 4에서 다른 security posture 및 audit requirement와 함께 다룹니다."),
+      item("Forward pointer\nModule 4 (Production Engineering, Evals & Security) goes deep on secure-by-design patterns for IAM and privacy, defenses against prompt injection from untrusted inputs, runtime guardrails, and agent hardening.", "Forward pointer\nModule 4(Production Engineering, Evals & Security)는 IAM과 privacy를 위한 secure-by-design pattern, untrusted input의 prompt injection 방어, runtime guardrail, agent hardening을 깊게 다룹니다."),
+      item("The role of this section is narrower: surface the constraint at the point in the build where it actually rules options out, which is when you pick the endpoint, the SDK client configuration, and the credentials your agent carries into production.", "이 section의 역할은 더 좁습니다. 실제로 option을 제외하는 build 지점, 즉 endpoint, SDK client configuration, production에 들어갈 agent의 credential을 선택하는 시점에 constraint를 드러내는 것입니다.")
+    ]
+  },
+  {
+    id: "2-7-agent-memory",
+    title: "2-7. Agent Memory",
+    items: [
+      item("2-7. Agent Memory", "2-7. Agent Memory"),
+      item("Choosing the right scope for state that survives sessions", "session을 넘어 살아남는 state에 적절한 scope 선택하기"),
+      item("The agent from the previous section runs correctly within a single session.", "이전 section의 agent는 single session 안에서는 올바르게 실행됩니다."),
+      item("What it cannot do is remember anything when that session ends.", "하지만 session이 끝나면 아무것도 기억하지 못합니다."),
+      item("Memory scope is how you decide what the agent should know at the start of the next session, and how much it costs to carry that knowledge forward.", "memory scope는 다음 session 시작 시 agent가 무엇을 알아야 하는지, 그리고 그 knowledge를 이어 가는 데 비용이 얼마나 드는지 결정하는 방식입니다.")
+    ]
+  },
+  {
+    id: "2-7-1-memory-patterns-and-when-each-is-right",
+    title: "2-7-1. Memory patterns and when each is right",
+    items: [
+      item("2-7-1. Memory patterns and when each is right", "2-7-1. Memory pattern과 각각이 맞는 상황"),
+      item("Beyond memory scope, the blueprint groups several agent design patterns under this objective, and you have already built each one earlier in this module.", "memory scope 외에도 blueprint는 이 objective 아래 여러 agent design pattern을 묶으며, 이 module 앞부분에서 이미 각각을 만들었습니다."),
+      item("The tool-use loop, where the model calls a tool, reads the result, and continues, is the core pattern from the tool-use and agent-construction clusters.", "model이 tool을 호출하고 result를 읽고 계속 진행하는 tool-use loop는 tool-use와 agent-construction cluster의 core pattern입니다."),
+      item("Multi-step task decomposition breaks a goal into ordered subtasks, and planning-and-execution separates deciding the plan from carrying it out.", "multi-step task decomposition은 goal을 ordered subtask로 나누고, planning-and-execution은 plan을 정하는 일과 실행하는 일을 분리합니다."),
+      item("Memory scope, covered next, is the pattern that decides what state survives once the loop ends.", "다음에 다룰 memory scope는 loop가 끝난 뒤 어떤 state가 살아남는지 결정하는 pattern입니다."),
+      item("Memory scope sets what an agent knows when a new session starts.", "memory scope는 새 session이 시작될 때 agent가 무엇을 알고 있는지 정합니다."),
+      item("Too much state in-context inflates every API call, because the model re-reads the full conversation on every turn and the bill scales with session length.", "in-context state가 너무 많으면 model이 매 turn 전체 conversation을 다시 읽고 비용이 session length에 따라 늘어나므로 모든 API call이 커집니다."),
+      item("Too little state in-persistent storage strips the agent of memory across sessions, because anything not written down disappears the moment the conversation ends.", "persistent storage에 state가 너무 적으면 적어 두지 않은 것은 conversation이 끝나는 순간 사라지므로 agent가 session 간 memory를 잃습니다."),
+      item("Scope: In-context memory\nWhat persists: State lives in the active conversation and survives turns within a single session.\nCost: Zero retrieval overhead; inflates token cost as conversation grows.\nWhen to use: Short sessions where all the state the agent needs fits inside the context window and nothing has to carry across restarts.\nWhat you lose: Everything once the session ends. A clear command or a new session wipes the state.", "Scope: In-context memory\nWhat persists: state는 active conversation 안에 있고 single session 내 turn 사이에서 유지됩니다.\nCost: retrieval overhead는 없지만 conversation이 커질수록 token cost가 증가합니다.\nWhen to use: agent가 필요한 모든 state가 context window에 들어가고 restart 이후로 가져갈 것이 없는 short session에 사용합니다.\nWhat you lose: session이 끝나면 모든 것을 잃습니다. clear command나 new session이 state를 지웁니다."),
+      item("Scope: External storage\nWhat persists: State is written to a database and read back at session start or on demand.\nCost: Each database call adds retrieval latency, and you take on the engineering work of read and write logic.\nWhen to use: State that has to survive across sessions, move between users, or be shared across multiple agent instances.\nWhat you lose: Nothing on the persistence side. The cost shows up as latency on every call and ongoing implementation complexity.", "Scope: External storage\nWhat persists: state를 database에 쓰고 session 시작 시 또는 필요할 때 다시 읽습니다.\nCost: 각 database call은 retrieval latency를 추가하고 read/write logic의 engineering work를 맡게 됩니다.\nWhen to use: session을 넘어 살아남거나 user 간 이동하거나 여러 agent instance 사이에서 공유되어야 하는 state에 사용합니다.\nWhat you lose: persistence 측면에서는 잃는 것이 없습니다. 비용은 call마다 latency와 ongoing implementation complexity로 나타납니다."),
+      item("Scope: Summarized memory\nWhat persists: A condensed version of prior conversation is generated and injected at the start of the next session.\nCost: Lower token cost per session than replaying full history, but the summarization step drops detail that was in the original.\nWhen to use: Long-running conversational agents where the full history would outgrow the context budget before the conversation is done.\nWhat you lose: Any detail the summarizer did not preserve. The agent only sees what the summarization prompt chose to keep.", "Scope: Summarized memory\nWhat persists: 이전 conversation의 condensed version을 생성해 다음 session 시작 시 주입합니다.\nCost: full history를 replay하는 것보다 session당 token cost는 낮지만 summarization step에서 원본 detail이 빠집니다.\nWhen to use: conversation이 끝나기 전에 full history가 context budget을 넘을 long-running conversational agent에 사용합니다.\nWhat you lose: summarizer가 보존하지 않은 모든 detail을 잃습니다. agent는 summarization prompt가 남기기로 한 것만 봅니다."),
+      item("Scope: No persistent memory (stateless)\nWhat persists: Nothing. Each session is independent.\nCost: No overhead at all, since there is nothing to retrieve or store.\nWhen to use: Task-execution agents that finish and close out, or pipelines where every session is fully independent by design.\nWhat you lose: All prior context. If a follow-up depends on something from an earlier session, the agent has no way to reach it.", "Scope: No persistent memory (stateless)\nWhat persists: 아무것도 유지되지 않습니다. 각 session은 independent합니다.\nCost: retrieve하거나 store할 것이 없으므로 overhead가 전혀 없습니다.\nWhen to use: finish and close out하는 task-execution agent나 모든 session이 설계상 완전히 independent한 pipeline에 사용합니다.\nWhat you lose: 모든 prior context를 잃습니다. follow-up이 이전 session의 무언가에 의존하면 agent는 접근할 방법이 없습니다.")
+    ]
+  },
+  {
+    id: "2-7-2-choosing-a-memory-scope-at-agent-design-time",
+    title: "2-7-2. Choosing a memory scope at agent design time",
+    items: [
+      item("2-7-2. Choosing a memory scope at agent design time", "2-7-2. Agent design time에 memory scope 선택하기"),
+      item("The choice of how an agent remembers prior interactions belongs in the design phase, not the production refactor.", "agent가 prior interaction을 어떻게 기억할지에 대한 선택은 production refactor가 아니라 design phase에 속합니다."),
+      item("An agent that helps the same user across multiple days needs to carry state between sessions.", "여러 날에 걸쳐 같은 user를 돕는 agent는 session 사이에 state를 carry해야 합니다."),
+      item("An agent that receives a single job, completes it, and closes it out has no prior session to recall, so it runs stateless.", "single job을 받고 완료한 뒤 close out하는 agent는 recall할 prior session이 없으므로 stateless로 실행됩니다."),
+      item("The default path looks reasonable at first. You store the full conversation history in the messages array, send it on every API call, and the prototype works.", "default path는 처음엔 합리적으로 보입니다. full conversation history를 messages array에 저장하고 모든 API call에 보내면 prototype은 작동합니다."),
+      item("The trouble starts further in, when token cost scales with every additional turn, latency climbs as the context window fills, and eventually a long session hits the hard limit and the agent stops responding.", "문제는 나중에 시작됩니다. turn이 추가될 때마다 token cost가 늘고, context window가 차면서 latency가 오르며, 결국 긴 session이 hard limit에 닿아 agent가 응답을 멈춥니다."),
+      item("At that point, you need to refactor: pull conversation state out of the live context, put it in external storage, and add only what each turn needs.", "그 시점에는 refactor가 필요합니다. conversation state를 live context 밖으로 꺼내 external storage에 넣고 각 turn에 필요한 것만 추가해야 합니다."),
+      item("Making the call during design phase is cheap, while doing it when it's time to refactor is more expensive.", "design phase에서 결정하는 것은 저렴하지만, refactor 시점에 하는 것은 더 비쌉니다."),
+      item("Handles well: The memory scope matches the task at design time.", "Handles well: design time에 memory scope가 task와 맞을 때 잘 작동합니다."),
+      item("Use external storage when the agent continues a thread across sessions. Use stateless when each job is self-contained. Use in-context when the session is short and does not need to survive a restart.", "agent가 session을 넘어 thread를 이어가면 external storage를 사용하세요. 각 job이 self-contained이면 stateless를 사용하세요. session이 짧고 restart 이후 유지할 필요가 없으면 in-context를 사용하세요."),
+      item("Adds cost or complexity: External storage adds retrieval latency and the read/write logic that goes with it.", "Adds cost or complexity: external storage는 retrieval latency와 그에 따르는 read/write logic을 추가합니다."),
+      item("Summarized memory depends on a well-specified summarizer prompt; without one, task-critical state gets dropped on every compression.", "summarized memory는 well-specified summarizer prompt에 의존합니다. 그것이 없으면 compression마다 task-critical state가 빠집니다."),
+      item("Use a different approach: Holding all state in-context on the assumption that the window will be large enough.", "Use a different approach: window가 충분히 클 것이라는 가정으로 모든 state를 in-context에 붙잡아 두는 방식은 피하세요."),
+      item("Token cost grows with every additional turn because the full context is sent on each API call.", "full context가 각 API call마다 전송되므로 token cost는 turn이 추가될 때마다 증가합니다."),
+      item("Measure actual session token usage against the window limit before committing.", "결정하기 전에 실제 session token usage를 window limit과 비교해 측정하세요.")
+    ]
+  },
+  {
+    id: "2-7-3-skills-reusable-instruction-sets-that-load-on-demand-without-inflating-every-session",
+    title: "2-7-3. Skills: reusable instruction sets that load on demand without inflating every session",
+    items: [
+      item("2-7-3. Skills: reusable instruction sets that load on demand without inflating every session", "2-7-3. Skills: 모든 session을 키우지 않고 필요할 때 load되는 reusable instruction set"),
+      item("The memory scope table above covers how an agent carries state across sessions.", "위 memory scope table은 agent가 session 간 state를 어떻게 carry하는지 다룹니다."),
+      item("There is a related but distinct problem: how you carry repeatable instructions across tasks without paying to inject them into every session.", "관련 있지만 별개의 문제가 있습니다. repeatable instruction을 모든 session에 주입하는 비용 없이 task 간에 어떻게 carry할 것인가입니다."),
+      item("The pattern for that is a Skill, a reusable markdown file that teaches Claude how to handle a specific kind of task once.", "그 pattern은 Skill입니다. Claude에게 특정 종류의 task를 처리하는 법을 한 번 가르치는 reusable markdown file입니다."),
+      item("Claude loads the Skill automatically when a request matches its description.", "request가 description과 match되면 Claude가 Skill을 자동으로 load합니다."),
+      item("The instructions sit on disk until they are needed; they are not resident in every conversation.", "instruction은 필요할 때까지 disk에 머물며 모든 conversation에 상주하지 않습니다."),
+      item("A Skill lives in a SKILL.md file inside an identified directory.", "Skill은 identified directory 안의 SKILL.md file에 있습니다."),
+      item("The file has two parts: a frontmatter block with a name and a description, and the instructions below it.", "file은 두 부분으로 구성됩니다. name과 description을 가진 frontmatter block, 그리고 그 아래의 instruction입니다."),
+      item("The description is the matching criterion.", "description이 matching criterion입니다."),
+      item("When you send a request, Claude reads the name and description of every available Skill, compares them against your message, and loads the full instructions only when there is a match.", "request를 보내면 Claude는 available Skill의 name과 description을 읽고 message와 비교한 뒤 match가 있을 때만 full instruction을 load합니다."),
+      item("If the instructions are not relevant to the current request, they never enter the context window.", "instruction이 current request와 관련 없으면 context window에 들어가지 않습니다."),
+      item("In-context memory is always present and grows with every turn.", "in-context memory는 항상 존재하며 turn마다 커집니다."),
+      item("CLAUDE.md behavior depends on where you are running Claude Code.", "CLAUDE.md behavior는 Claude Code를 어디에서 실행하는지에 따라 달라집니다."),
+      item("In the Claude Code CLI, a CLAUDE.md file loads into every session regardless of what task is running.", "Claude Code CLI에서는 어떤 task가 실행되든 CLAUDE.md file이 모든 session에 load됩니다."),
+      item("In the Agent SDK, whether filesystem settings including CLAUDE.md load is controlled by the settingSources configuration.", "Agent SDK에서는 CLAUDE.md를 포함한 filesystem setting이 load되는지가 settingSources configuration으로 제어됩니다."),
+      item("A Skill, by contrast, loads only when the task calls for it, in both environments.", "반면 Skill은 두 environment 모두에서 task가 요구할 때만 load됩니다."),
+      item("Pattern: Skill (SKILL.md)\nWhen it loads: On demand when the request matches the skill's description.\nContext cost: Low. Only the name and description load at startup; full content loads only on match.\nBest for: Task-specific expertise that should not inflate sessions where it is not needed.", "Pattern: Skill (SKILL.md)\nWhen it loads: request가 skill description과 match될 때 on demand로 load됩니다.\nContext cost: 낮습니다. startup에는 name과 description만 load되고 full content는 match될 때만 load됩니다.\nBest for: 필요하지 않은 session을 키우지 않아야 하는 task-specific expertise에 적합합니다."),
+      item("Pattern: CLAUDE.md\nWhen it loads: Every session, unconditionally.\nContext cost: Fixed overhead per session regardless of task.\nBest for: Always-on project standards that apply to everything.", "Pattern: CLAUDE.md\nWhen it loads: 모든 session에 unconditionally load됩니다.\nContext cost: task와 상관없이 session마다 fixed overhead가 있습니다.\nBest for: 모든 것에 적용되는 always-on project standard에 적합합니다."),
+      item("Pattern: In-context instructions\nWhen it loads: Present for every turn within that session.\nContext cost: Grows with session length; does not survive session end.\nBest for: Short sessions where the full history fits within the window and nothing needs to persist.", "Pattern: In-context instructions\nWhen it loads: 해당 session 안의 모든 turn에 존재합니다.\nContext cost: session length와 함께 증가하며 session end 후에는 남지 않습니다.\nBest for: full history가 window에 들어가고 persist할 필요가 없는 short session에 적합합니다.")
+    ]
+  },
+  {
+    id: "2-7-4-current-availability-skills-on-the-messages-api",
+    title: "2-7-4. Current availability: Skills on the Messages API",
+    items: [
+      item("2-7-4. Current availability: Skills on the Messages API", "2-7-4. Current availability: Messages API에서의 Skills"),
+      item("Skills are available on the Messages API today, but the integration is in beta and the configuration is not the same as the Claude Code or Agent SDK paths.", "Skills는 현재 Messages API에서 사용할 수 있지만 integration은 beta이고 configuration은 Claude Code나 Agent SDK path와 같지 않습니다."),
+      item("Two beta headers are required on the API request: code-execution-2025-08-25 and skills-2025-10-02.", "API request에는 두 beta header가 필요합니다. code-execution-2025-08-25와 skills-2025-10-02입니다."),
+      item("Skills invoked this way run inside the code execution container rather than in the calling application's environment, which has implications for what tools and filesystem access the Skill can rely on.", "이 방식으로 invoke된 Skill은 calling application environment가 아니라 code execution container 안에서 실행되므로, Skill이 의존할 수 있는 tool과 filesystem access에 영향이 있습니다."),
+      item("Beta headers are versioned and change as features move toward general availability.", "beta header는 versioned되어 있으며 feature가 general availability로 이동하면서 바뀔 수 있습니다."),
+      item("Before building against this configuration in production, check the current Anthropic API documentation to confirm the header values, whether the feature has reached general availability, and whether the code execution container is still the runtime path.", "production에서 이 configuration을 기준으로 build하기 전에 current Anthropic API documentation에서 header value, feature가 general availability에 도달했는지, code execution container가 여전히 runtime path인지 확인하세요."),
+      item("One important constraint: Subagents do not automatically inherit Skills from the parent session.", "중요한 constraint 하나는 subagent가 parent session의 Skill을 자동으로 inherit하지 않는다는 점입니다."),
+      item("When you delegate a task to a subagent, it starts with a clean context.", "subagent에 task를 delegate하면 clean context에서 시작합니다."),
+      item("Note that while Skills and conversation history do not carry over, subagents do inherit the permission context from the parent session; permission scope is not reset at delegation.", "Skill과 conversation history는 carry over되지 않지만, subagent는 parent session의 permission context를 inherit합니다. permission scope는 delegation에서 reset되지 않습니다."),
+      item("If the subagent needs a Skill, you must explicitly list it in the subagent's configuration.", "subagent에 Skill이 필요하다면 subagent configuration에 명시적으로 list해야 합니다."),
+      item("This matters at agent design time: if you are wiring a subagent to perform a task that depends on specific instructions, those instructions need to be registered against the subagent, not assumed to carry over from the parent.", "이는 agent design time에 중요합니다. specific instruction에 의존하는 task를 수행하도록 subagent를 wiring한다면, 그 instruction은 parent에서 carry over된다고 가정하지 말고 subagent에 등록해야 합니다.")
+    ]
+  },
+  {
+    id: "2-8-multimodal-and-batch-ingestion",
+    title: "2-8. Multimodal and Batch Ingestion",
+    items: [
+      item("2-8. Multimodal and Batch Ingestion", "2-8. Multimodal and Batch Ingestion"),
+      item("Images, PDFs, and high-volume processing", "image, PDF, high-volume processing"),
+      item("Up to now you've been managing what Claude remembers between turns.", "지금까지는 Claude가 turn 사이에서 무엇을 기억하는지를 관리했습니다."),
+      item("Multimodal ingestion shifts the question to what you're sending in: every image and PDF consumes context budget before Claude reads a single character of your prompt, which changes how you structure requests and what you can fit in one.", "multimodal ingestion은 질문을 무엇을 보내는가로 옮깁니다. 모든 image와 PDF는 Claude가 prompt의 한 글자를 읽기 전에 context budget을 소비하며, 이는 request structure와 한 번에 넣을 수 있는 양을 바꿉니다."),
+      item("When you have thousands of inputs to process, sending one request at a time and waiting for each response stops making sense.", "처리할 input이 수천 개라면 request를 하나씩 보내고 각 response를 기다리는 방식은 더 이상 적절하지 않습니다."),
+      item("The Batch API is how you handle that volume without blocking your application.", "Batch API는 application을 block하지 않고 그 volume을 처리하는 방법입니다.")
+    ]
+  },
+  {
+    id: "2-8-1-image-token-cost-calculate-before-you-commit",
+    title: "2-8-1. Image token cost: Calculate before you commit",
+    items: [
+      item("2-8-1. Image token cost: Calculate before you commit", "2-8-1. Image token cost: 결정하기 전에 계산하세요"),
+      item("Images are not free in terms of context budget.", "image는 context budget 측면에서 무료가 아닙니다."),
+      item("Claude views images in patches: each 28×28-pixel block of the image is one visual token, so an image costs ⌈width / 28⌉ × ⌈height / 28⌉ visual tokens.", "Claude는 image를 patch로 봅니다. image의 각 28×28 pixel block이 visual token 하나이므로 image cost는 ⌈width / 28⌉ × ⌈height / 28⌉ visual token입니다."),
+      item("A 1,000 × 1,000 pixel image is ⌈1000/28⌉ × ⌈1000/28⌉ = 36 × 36 patches, about 1,296 visual tokens.", "1,000 × 1,000 pixel image는 ⌈1000/28⌉ × ⌈1000/28⌉ = 36 × 36 patch, 약 1,296 visual token입니다."),
+      item("At that rate, ten high-resolution screenshots consume as much context as a detailed system prompt.", "그 정도라면 high-resolution screenshot 10장은 detailed system prompt만큼의 context를 소비합니다."),
+      item("Each model also has a maximum native image resolution, expressed as a long-edge limit and a visual-token limit, and these limits differ by model tier.", "각 model에는 long-edge limit과 visual-token limit으로 표현되는 maximum native image resolution이 있으며, 이 limit은 model tier마다 다릅니다."),
+      item("The newest models accept substantially larger images than the standard tier.", "newest model은 standard tier보다 훨씬 큰 image를 받습니다."),
+      item("Images larger than either limit are downscaled before processing, so the formula runs on the scaled dimensions.", "둘 중 하나의 limit보다 큰 image는 processing 전에 downscale되므로 formula는 scaled dimension에 적용됩니다."),
+      item("Confirm the current per-tier limits against the Vision page (Resolution and token cost) at build time; the limits have changed between model generations and will again.", "build time에 Vision page의 Resolution and token cost를 기준으로 current per-tier limit을 확인하세요. limit은 model generation 사이에 바뀌었고 앞으로도 바뀔 수 있습니다."),
+      item("The calculation matters at design time.", "이 계산은 design time에 중요합니다."),
+      item("If you are building a pipeline that processes images, measure the token cost of a typical production image against your model's context limit before you write the ingestion code.", "image를 처리하는 pipeline을 만든다면 ingestion code를 작성하기 전에 typical production image의 token cost를 model context limit과 비교해 측정하세요."),
+      item("The fix for an over-budget pipeline is often a ten-minute image resize step.", "over-budget pipeline의 해결책은 종종 10분짜리 image resize step입니다."),
+      item("If you discover this after deployment, it takes even longer.", "deployment 후에 발견하면 더 오래 걸립니다.")
+    ]
+  },
+  {
+    id: "2-8-2-different-ways-to-send-an-image-when-each-is-right",
+    title: "2-8-2. Different ways to send an image: When each is right",
+    items: [
+      item("2-8-2. Different ways to send an image: When each is right", "2-8-2. Image를 보내는 여러 방식: 각각이 맞는 상황"),
+      item("Inline base64", "Inline base64"),
+      item("How it works: Encode the image bytes as a base64 string and include the data directly in the message block.", "How it works: image byte를 base64 string으로 encode하고 data를 message block에 직접 포함합니다."),
+      item("Overhead: The full encoded payload travels with every request, which inflates request size and counts against latency on large images.", "Overhead: full encoded payload가 모든 request와 함께 이동하므로 request size가 커지고 large image에서는 latency에 영향을 줍니다."),
+      item("When to use: Best for one-off images where adding an upload step would add complexity without a payoff.", "When to use: upload step을 추가해도 이득 없이 complexity만 늘어나는 one-off image에 가장 적합합니다."),
+      item("The same image sent repeatedly multiplies the cost, so reach for a different method if reuse is likely.", "같은 image를 반복해서 보내면 cost가 배가되므로 reuse 가능성이 있다면 다른 method를 선택하세요."),
+      item("URL reference", "URL reference"),
+      item("How it works: Pass a publicly reachable URL in the source block, and Claude fetches the image at request time.", "How it works: source block에 publicly reachable URL을 전달하면 Claude가 request time에 image를 가져옵니다."),
+      item("Overhead: No payload travels with the request, but you take on the dependency that the URL must be stable, public, and reachable at the moment Claude tries to fetch it.", "Overhead: payload는 request와 함께 이동하지 않지만, Claude가 fetch하려는 순간 URL이 stable, public, reachable해야 한다는 dependency를 맡게 됩니다."),
+      item("When to use: Best when the image is already hosted at a stable public URL you control.", "When to use: image가 이미 직접 control하는 stable public URL에 hosted되어 있을 때 가장 적합합니다."),
+      item("Skip it for anything behind auth, anything signed with a short expiry, or anything you can't guarantee will be reachable when the request runs.", "auth 뒤에 있거나 short expiry로 signed되었거나 request 실행 시 reachable하다고 보장할 수 없는 경우에는 피하세요."),
+      item("Files API", "Files API"),
+      item("How it works: Upload the file once through a separate API call, receive a file_id, and reference that ID in any future message.", "How it works: separate API call로 file을 한 번 upload하고 file_id를 받은 뒤 이후 message에서 그 ID를 참조합니다."),
+      item("Overhead: The upload is a one-time cost; every later request carries the ID instead of the bytes, so payload overhead drops to near-zero from that point on.", "Overhead: upload는 one-time cost입니다. 이후 모든 request는 byte 대신 ID를 carry하므로 그 시점부터 payload overhead가 거의 0으로 떨어집니다."),
+      item("Currently in beta and not available on Bedrock or Vertex AI; verify availability for your deployment platform.", "현재 beta이며 Bedrock 또는 Vertex AI에서는 사용할 수 없습니다. deployment platform에서 availability를 확인하세요."),
+      item("When to use: Best when the same image or PDF appears across multiple requests, or when the asset is large enough that re-sending it would dominate request size.", "When to use: 같은 image나 PDF가 multiple request에 나타나거나 asset이 커서 다시 보내는 것이 request size를 지배할 때 가장 적합합니다."),
+      item("Also, the cleanest choice when you want asset management to live separately from inference calls, and the right choice for images that appear across multiple conversation turns, since the file_id carries no payload weight as history grows.", "또한 asset management를 inference call과 분리하고 싶을 때 가장 깔끔한 선택이며, file_id는 history가 커져도 payload weight를 갖지 않으므로 multiple conversation turn에 걸쳐 등장하는 image에 적합합니다.")
+    ]
+  },
+  {
+    id: "2-8-3-sending-pdfs-the-document-block",
+    title: "2-8-3. Sending PDFs: The document block",
+    items: [
+      item("2-8-3. Sending PDFs: The document block", "2-8-3. PDF 보내기: document block"),
+      item("For PDFs, the block type is document rather than image.", "PDF의 경우 block type은 image가 아니라 document입니다."),
+      item("The source structure follows the same pattern as images, which means it can be base64, a URL, or a Files API file_id.", "source structure는 image와 같은 pattern을 따르므로 base64, URL, 또는 Files API file_id가 될 수 있습니다."),
+      item("There is no required name field on a document block.", "document block에는 required name field가 없습니다."),
+      item("The block accepts an optional title field for a readable document name, and an optional context field for additional metadata, but neither is required to send a PDF.", "block은 readable document name을 위한 optional title field와 추가 metadata를 위한 optional context field를 받지만, PDF를 보내는 데 둘 다 필수는 아닙니다."),
+      item("All other mechanics, including token cost considerations and Files API reuse, apply in the same way.", "token cost 고려와 Files API reuse를 포함한 다른 모든 mechanism은 같은 방식으로 적용됩니다."),
+      item("{\n  \"type\": \"document\",\n  \"source\": {\n    \"type\": \"base64\",\n    \"media_type\": \"application/pdf\",\n    \"data\": \"<base64-encoded-pdf-bytes>\"\n  },\n  \"title\": \"contract_review.pdf\"\n}", "{\n  \"type\": \"document\",\n  \"source\": {\n    \"type\": \"base64\",\n    \"media_type\": \"application/pdf\",\n    \"data\": \"<base64-encoded-pdf-bytes>\"\n  },\n  \"title\": \"contract_review.pdf\"\n}")
+    ]
+  },
+  {
+    id: "2-8-4-applying-prompting-techniques-to-multimodal-inputs",
+    title: "2-8-4. Applying prompting techniques to multimodal inputs",
+    items: [
+      item("2-8-4. Applying prompting techniques to multimodal inputs", "2-8-4. Multimodal input에 prompting technique 적용하기"),
+      item("The same prompting techniques from the first section apply to image and PDF analysis.", "첫 section의 같은 prompting technique이 image와 PDF analysis에도 적용됩니다."),
+      item("A bare \"describe this image\" prompt produces shallow output for the same reason a bare text prompt does as Claude has no target structure to aim for.", "bare \"describe this image\" prompt는 bare text prompt와 같은 이유로 shallow output을 만듭니다. Claude가 목표로 삼을 target structure가 없기 때문입니다."),
+      item("The difference is that images carry ambiguity that text cannot, which includes overlapping objects, depth and spatial relationships, and partial occlusion.", "차이는 image가 text에는 없는 ambiguity를 가진다는 점입니다. 여기에는 overlapping object, depth와 spatial relationship, partial occlusion이 포함됩니다."),
+      item("A prompt for visual analysis should name how Claude should handle each type of ambiguity.", "visual analysis prompt는 Claude가 각 ambiguity type을 어떻게 처리해야 하는지 명시해야 합니다."),
+      item("\"If objects overlap, describe each separately and note the overlap\" is a concrete constraint that a text-only prompt would never need.", "\"If objects overlap, describe each separately and note the overlap\"은 text-only prompt라면 필요하지 않을 concrete constraint입니다.")
+    ]
+  },
+  {
+    id: "2-8-5-the-message-batches-api-high-volume-asynchronous-processing",
+    title: "2-8-5. The Message Batches API: High-volume asynchronous processing",
+    items: [
+      item("2-8-5. The Message Batches API: High-volume asynchronous processing", "2-8-5. Message Batches API: high-volume asynchronous processing"),
+      item("When you need to run the same prompt pattern against hundreds or thousands of inputs, the synchronous API is the wrong model.", "수백 또는 수천 개의 input에 같은 prompt pattern을 실행해야 한다면 synchronous API는 잘못된 model입니다."),
+      item("Each synchronous call blocks until complete.", "각 synchronous call은 완료될 때까지 block됩니다."),
+      item("At scale, that means your application is either burning threads or running thousands of concurrent connections against rate limits.", "scale이 커지면 application이 thread를 소모하거나 rate limit을 상대로 수천 개의 concurrent connection을 실행하게 됩니다."),
+      item("The Message Batches API accepts up to 100,000 or 256 MB requests (whichever comes first) in a single batch call.", "Message Batches API는 single batch call에서 최대 100,000개 또는 256 MB request 중 먼저 도달하는 한도까지 받습니다."),
+      item("You submit the batch, receive a batch_id, and poll for completion.", "batch를 submit하고 batch_id를 받은 뒤 completion을 poll합니다."),
+      item("When the batch finishes, you download the results.", "batch가 끝나면 result를 download합니다."),
+      item("The per-token cost for batch requests is lower than for synchronous ones.", "batch request의 per-token cost는 synchronous request보다 낮습니다."),
+      item("The tradeoff is latency: batch processing is non-deterministic and can take up to 24 hours, often much faster.", "tradeoff는 latency입니다. batch processing은 non-deterministic하며 최대 24시간이 걸릴 수 있지만, 보통은 훨씬 빠릅니다."),
+      item("The pattern suits offline pipelines, evaluation runs, and data processing jobs, not real-time user interactions.", "이 pattern은 real-time user interaction이 아니라 offline pipeline, evaluation run, data processing job에 적합합니다."),
+      item("Use case: A user uploads a photo and expects an immediate classification.\nRight API pattern: Synchronous API.\nWhy: Real-time response is required. Batch latency is unacceptable for interactive use.", "Use case: user가 photo를 upload하고 immediate classification을 기대합니다.\nRight API pattern: Synchronous API.\nWhy: real-time response가 필요합니다. interactive use에는 batch latency를 허용할 수 없습니다."),
+      item("Use case: A nightly pipeline classifies 5,000 customer records.\nRight API pattern: Message Batches API.\nWhy: Latency is not a constraint. Batch cost reduction and asynchronous processing are both valuable.", "Use case: nightly pipeline이 5,000개 customer record를 classify합니다.\nRight API pattern: Message Batches API.\nWhy: latency가 constraint가 아닙니다. batch cost reduction과 asynchronous processing이 모두 가치 있습니다."),
+      item("Use case: An evaluation run tests a new prompt against 2,000 examples.\nRight API pattern: Message Batches API.\nWhy: Offline task with no real-time requirement. Batch is the correct pattern.", "Use case: evaluation run이 2,000개 example에 대해 new prompt를 test합니다.\nRight API pattern: Message Batches API.\nWhy: real-time requirement가 없는 offline task입니다. Batch가 올바른 pattern입니다."),
+      item("Use case: A chatbot generates a reply to a user's message.\nRight API pattern: Synchronous API.\nWhy: The user is waiting; batch would introduce unacceptable delay.", "Use case: chatbot이 user message에 대한 reply를 생성합니다.\nRight API pattern: Synchronous API.\nWhy: user가 기다리고 있으므로 batch는 허용할 수 없는 delay를 만듭니다.")
+    ]
+  },
+  {
+    id: "2-8-6-when-multimodal-and-batch-fit-together-and-when-they-dont",
+    title: "2-8-6. When multimodal and batch fit together, and when they don't",
+    items: [
+      item("2-8-6. When multimodal and batch fit together, and when they don't", "2-8-6. Multimodal과 batch가 잘 맞는 때와 그렇지 않은 때"),
+      item("The combination works for offline workloads that reuse the same assets and need structured output across thousands of inputs.", "이 조합은 같은 asset을 reuse하고 수천 개 input에 걸쳐 structured output이 필요한 offline workload에 잘 맞습니다."),
+      item("A nightly pipeline classifying images against a fixed taxonomy is the textbook case: Files API removes redundant uploads, Batches API absorbs the latency, structured-output techniques keep results machine-readable.", "fixed taxonomy에 따라 image를 classify하는 nightly pipeline이 대표적인 case입니다. Files API는 redundant upload를 제거하고, Batches API는 latency를 흡수하며, structured-output technique은 result를 machine-readable하게 유지합니다."),
+      item("Two failure modes break the fit.", "두 가지 failure mode가 이 fit을 깨뜨립니다."),
+      item("The first is misreading latency: reaching for batch in any user-facing flow with an image produces a system that passes tests and fails in production, because the user is waiting and the batch isn't.", "첫 번째는 latency를 잘못 읽는 것입니다. image가 포함된 user-facing flow에서 batch를 사용하면 test는 통과하지만 production에서 실패하는 system이 됩니다. user는 기다리고 있지만 batch는 그렇지 않기 때문입니다."),
+      item("The second is underestimating context cost: images and PDFs consume budget before Claude processes any text, so pipelines loading multiple large images per request blow past token limits at scale.", "두 번째는 context cost를 과소평가하는 것입니다. image와 PDF는 Claude가 text를 처리하기 전에 budget을 소비하므로 request마다 여러 large image를 load하는 pipeline은 scale에서 token limit을 넘습니다."),
+      item("Measure token cost on production-scale inputs before you build.", "build하기 전에 production-scale input에서 token cost를 측정하세요.")
     ]
   }
 ];
