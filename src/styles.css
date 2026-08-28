@@ -259,6 +259,16 @@ button.copy-button:hover {
   overflow-wrap: anywhere;
 }
 
+.word-term {
+  font-size: 36px;
+  font-weight: 700;
+}
+
+.word-meaning {
+  font-size: 28px;
+  line-height: 1.45;
+}
+
 .controls,
 .original-controls {
   display: flex;
@@ -318,6 +328,14 @@ button.copy-button:hover {
 
   .sentence {
     font-size: 20px;
+  }
+
+  .word-term {
+    font-size: 34px;
+  }
+
+  .word-meaning {
+    font-size: 27px;
   }
 
   .controls {

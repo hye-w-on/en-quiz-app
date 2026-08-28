@@ -233,12 +233,12 @@ function App() {
                 {copiedText === currentWord.term ? "Copied" : "Copy"}
               </button>
             </div>
-            <p className="sentence">{currentWord.term}</p>
+            <p className="sentence word-term">{currentWord.term}</p>
           </div>
 
           <div className={wordAnswerVisible ? "answer-box" : "answer-box is-hidden"}>
             <p className="label">뜻</p>
-            <p className="answer">{currentWord.meaning}</p>
+            <p className="answer word-meaning">{currentWord.meaning}</p>
           </div>
 
           <div className="controls word-controls">
