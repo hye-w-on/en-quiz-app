@@ -56,12 +56,12 @@ function App() {
 
     const showAnswerTimer = window.setTimeout(() => {
       setWordAnswerVisible(true);
-    }, 2000);
+    }, 3000);
 
     const moveNextTimer = window.setTimeout(() => {
       setWordIndex((index) => (index + 1) % shuffledWordItems.length);
       setWordAnswerVisible(false);
-    }, 3000);
+    }, 5000);
 
     return () => {
       window.clearTimeout(showAnswerTimer);

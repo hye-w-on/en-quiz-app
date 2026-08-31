@@ -281,7 +281,7 @@ more precise = 더 정확한, 더 구체적인, 더 명확한
 precise = 정확한, 정밀한, 구체적인
 iteration = 반복, 반복 작업, 반복 과정
 consistent enough to ~ = ~할 수 있을 만큼 일관된
-reach for = ~을 꺼내 쓰다, ~을 사용하려 하다
+reach for = ~을 선택해쓰다, ~을 사용하다
 carry = 담고 있다, 포함하고 있다
 behavioral = 행동의, 행동에 관한
 descriptive = 설명적인, 내용을 잘 나타내는
@@ -355,7 +355,152 @@ thinking block = Claude의 내부 추론 내용
 subsequent = 그다음의, 이후의, 후속의
 A costs the same as B = A는 B와 비용이 같다
 strategically = 전략적으로
-work through A = A를 하나씩 검토하며 해결하다 / 차근차근 처리하다`;
+work through A = A를 하나씩 검토하며 해결하다 / 차근차근 처리하다
+A is tampered with = A가 변조되다
+redacted = 가려진, 삭제 처리된
+along with = ~와 함께
+what + to + 동사원형 = 무엇을 ~할지
+back-and-forth = 주고받는 과정, 서로 요청하고 응답하는 과정
+bugs live = 버그가 발생하다, 존재하다
+sequence = 순서
+issue = 발행하다
+fresh API request = 새 API 요청
+prior = 이전의
+Note = 주의하다
+references = 참조하다
+be built out of ~ = ~로 구성되다, ~로 만들어지다
+do the work = 실제 역할을 수행하다, 작업을 처리하다
+prose = 서술형
+specific = 특정한, 구체적인, 정해진
+govern = 지배하다, 통제하다, 규정하다
+alongside A = A와 함께 / A와 나란히
+preserve = 보존하다, 그대로 유지하다
+corrupt A = A를 손상시키다
+rely on A = A에 의존하다
+relies on A = A에 의존하다
+which matters = 그것이 중요하다 / 이 점이 중요하다(which는 앞에서 말한 내용 전체)
+invariant = 불변조건
+in a later turn = 이후 턴에서
+descriptive = 설명적인, 묘사하는
+determine = 결정하다, 판단하다
+exclusion = 제외, 배제
+exclusion condition = 제외 조건
+mark parameters as required = 매개변수를 필수로 지정하다
+Overlapping = 겹치는
+under-described = 설명이 불충분한
+syntactically correct = 문법적으로 올바른
+sequential = 순차적인
+parallel = 병렬의
+diverge = 갈라지다, 서로 달라지다
+feed A = A에 공급하다 / A로 전달되다
+concurrently = 동시에
+model A as B = A를 B로 구성하다 / A를 B로 간주하다
+place A in B = A를 B에 넣다 / A를 B에 배치하다
+fabricate = 지어내다, 조작하다
+have no basis to V = V할 근거가 없다
+non-negotiable = 타협할 수 없는
+sensible defaults = 합리적인/적절한 기본값
+absence carries meaning = 값이 없다는 것 자체가 의미를 가진다
+leave A out of B = A를 B에서 제외하다
+invent a value = 값을 지어내다
+where format matters = 형식이 중요한 경우에
+get buried under A = A 속에 묻히다
+disambiguating = 혼동을 없애는, 구분을 명확하게 하는
+disambiguating language = 구분을 명확하게 해주는 문구
+be meant for A = A를 위한 것이다 / A 용도로 만들어지다
+identical = 동일한
+collapse to A = 결국 A에만 의존하게 되다 / A로 축소되다
+indistinguishable = 구별할 수 없는
+illustrative = 설명을 위한, 예시용의
+observed in A = A에서 관찰된
+reliably = 안정적으로, 일관되게
+be stated = 명시되다
+A as an alternative to B = B의 대안으로서 A
+manual = 수동의, 직접 하는
+authoring = 작성하는 것
+move A out of B and into C = A를 B 밖으로 빼서 C 안으로 옮기다
+dedicated = 전용의, 특정 목적을 위해 따로 마련된
+dedicated server = 전용 서버
+concrete = 구체적인, 명확한, 실제적인
+maintain = 유지·관리하다
+as S evolves = S가 변화함에 따라
+introduce = 도입하다
+underlying = 기저의, 근본적인
+mechanism = 작동 원리, 메커니즘
+from A's perspective = A의 관점에서
+practical = 실질적인, 실용적인
+implication = 시사점, 함의
+worth noting = 주목할 만한 / 알아둘 만한
+worth V-ing = V할 가치가 있는
+discipline = 규율
+control A through B = B를 통해 A를 제어하다
+carry A = A를 포함하다, 가지고 있다
+keyed by A = A를 키로 하는
+upfront = 처음부터 발생하는, 초기의
+stdio = standard input/output, 표준 입출력
+spawn A as B = A를 B로 생성·실행하다
+subprocess = 하위 프로세스, 서브프로세스
+worth flagging = 주의할 만한, 짚고 넘어갈 만한
+owning = 소유하는 것
+capability = 능력
+general-purpose = 범용의, 여러 용도로 쓰이는
+breadth = 폭, 넓이
+for breadth = 폭넓은 기능/범위를 위해
+description-tuning discipline = 도구 설명을 정교하게 조정하는 원칙/방법
+mutually exclusive = 상호 배타적인, 둘 중 하나만 가능한
+mutual = 상호 간의, 서로의
+layer in A = A를 추가하다, 덧붙이다
+via B = B를 통해
+surface area = 범위, 영역
+reason over A = A에 대해 추론하다 / A를 놓고 추론하다
+narrow A = A를 좁히다
+sharpen A = A를 날카롭게 하다, 명확하게 다듬다
+corrupt = 손상시키다, 망가뜨리다
+so far = 지금까지, 현재까지
+staring = 응시하는
+send A along = A를 계속 보내다 / A를 전달하다
+as S + V = S가 V함에 따라 / S가 V하는 동시에
+series = 일련의
+be tasked with A = A라는 일을 맡다
+end up with A = 결국 A를 가지게 되다 / 최종적으로 A를 얻게 되다
+be identical to A = A와 동일하다
+hold A open = A를 열린 상태로 유지하다
+spread across A = A에 걸쳐 퍼져 있는 / A에 나뉘어 있는
+several deltas = 여러 개의 delta
+incremental = 점진적인, 조금씩 증가하는, 단계적으로 추가되는
+accumulated = 누적된, 쌓인
+either A or B = A이거나 B
+choke on A = A를 처리하지 못하다 / A 때문에 실패하다
+get cut off = 끊기다, 중단되다
+partway = 도중에, 중간에
+bite = 큰 문제를 일으키다, 타격을 주다
+cosmetic = 외관상의, 겉으로만 보이는
+glitch = 작은 오류, 일시적인 문제
+on purpose = 의도적으로, 일부러
+provisional = 임시의, 잠정적인
+explicitly = 명시적으로
+early = 초기에
+workload = 처리해야 할 작업`;
+
+const additionalWordItems: WordItem[] = [
+  { term: "move within A", meaning: "A 안에서 움직이다" },
+  { term: "floor", meaning: "하한선, 최저 기준" },
+  { term: "take in A", meaning: "A를 받아들이다" },
+  { term: "span", meaning: "범위, 폭" },
+  { term: "span", meaning: "~에 걸치다, 아우르다" },
+  { term: "compact", meaning: "압축하다" },
+  { term: "stall", meaning: "멈추다, 진행이 막히다" },
+  { term: "fill up", meaning: "가득 차다" },
+  { term: "in advance", meaning: "미리" },
+  { term: "at all", meaning: "애초에" },
+  { term: "deliberately", meaning: "의도적으로, 일부러, 신중하게" },
+  { term: "optimized for A", meaning: "A에 최적화된" },
+  { term: "envelope", meaning: "범위, 한계 범위, 봉투" },
+  { term: "demanding", meaning: "까다로운, 요구 수준이 높은" },
+  { term: "capable", meaning: "능력 있는, 성능이 뛰어난" },
+  { term: "sophisticated", meaning: "정교한, 고도화된" },
+  { term: "regression", meaning: "퇴보, 성능 저하 (이전보다 나빠짐)" }
+];
 
 export const wordItems: WordItem[] = wordSourceText
   .split("\n")
@@ -372,4 +517,5 @@ export const wordItems: WordItem[] = wordSourceText
       meaning: match[2].trim()
     };
   })
-  .filter((item): item is WordItem => Boolean(item?.term && item.meaning));
+  .filter((item): item is WordItem => Boolean(item?.term && item.meaning))
+  .concat(additionalWordItems);
