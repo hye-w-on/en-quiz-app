@@ -249,6 +249,7 @@ button.copy-button:hover {
   margin: 0;
   font-size: 24px;
   line-height: 1.35;
+  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
@@ -256,6 +257,7 @@ button.copy-button:hover {
   margin: 0;
   font-size: 18px;
   color: #263238;
+  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
